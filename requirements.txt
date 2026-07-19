@@ -1,4 +1,7 @@
-customtkinter
-undetected-chromedriver
-selenium
-setuptools
+# YouLikeHits Autobot - Python Dependencies
+# All third-party packages required by the bot.
+
+customtkinter>=5.0.0
+undetected-chromedriver>=3.5.0
+selenium>=4.10.0
+setuptools>=65.0.0
