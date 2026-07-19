@@ -4,6 +4,21 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Ensure DISPLAY is set (for RDP / VNC / X sessions) ──
+if [ -z "$DISPLAY" ]; then
+    # Try common display values
+    if [ -d "/tmp/.X11-unix" ]; then
+        export DISPLAY=:0
+    elif pgrep -x "Xrdp" >/dev/null 2>&1; then
+        export DISPLAY=:10
+    elif pgrep -x "Xvnc" >/dev/null 2>&1; then
+        export DISPLAY=:1
+    else
+        export DISPLAY=:0
+    fi
+    echo "[*] DISPLAY was empty. Set to $DISPLAY"
+fi
+
 # ── Ensure tkinter (system package, not pip) ──
 if ! python3 -c "import tkinter" 2>/dev/null; then
     echo "[*] tkinter not found. Attempting to install via system package manager..."
