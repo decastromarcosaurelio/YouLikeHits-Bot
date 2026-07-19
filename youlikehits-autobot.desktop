@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=YouLikeHits Autobot
+GenericName=Social Media Bot
+Comment=Automate social media exchange tasks on YouLikeHits
+Exec=bash -c 'cd INSTALL_DIR && ./run.sh'
+Icon=INSTALL_DIR/icon.png
+Terminal=false
+Categories=Network;Utility;
+StartupWMClass=youlikehits-autobot
+Keywords=youlikehits;bot;automation;social;youtube;tiktok;
+MimeType=x-scheme-handler/youlikehits;

@@ -1,0 +1,35 @@
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "YouLikeHits Autobot | Free Social Media Growth",
+  description:
+    "Automate YouTube views, TikTok followers, SoundCloud plays, and more on YouLikeHits. Open-source Python bot with GUI. Works on XFCE, KDE Plasma, and any Linux desktop.",
+  keywords: [
+    "youlikehits",
+    "bot",
+    "automation",
+    "youtube views",
+    "tiktok followers",
+    "soundcloud plays",
+    "social media",
+    "free",
+    "open source",
+  ],
+  openGraph: {
+    title: "YouLikeHits Autobot",
+    description:
+      "Automate social media exchange tasks on YouLikeHits. Free, open-source Python bot with GUI.",
+    type: "website",
+  },
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body className="bg-gray-950 text-gray-100 antialiased">{children}</body>
+    </html>
+  );
+}
