@@ -14,7 +14,7 @@ Free, open-source Python bot that automates exchange tasks on [YouLikeHits.com](
 | YouTube Views  | `youtubenew2.php`      | Clicks "View", waits for the page's timer (2-3 min), reads the result |
 | SoundCloud Plays | `soundcloudplays.php` | Clicks "Listen", waits for the page's timer (~1 min), reads the result |
 | Daily Bonus    | `bonuspoints.php`      | Reports today's hits toward the next milestone; claims when one is reachable |
-| Master Loop    | all of the above       | Bonus, then 3 sites, 2 videos, 2 tracks; waits 1-3 min; repeats   |
+| Master Loop    | all of the above       | Bonus, then 3 sites, 2 videos, 2 tracks; waits a random 1-3 min (adjustable); repeats |
 
 - **GUI + CLI** — customtkinter window or a terminal menu. Both run the exact same task code.
 - **Stop responds within ~1 s** — every wait is interruptible.
@@ -38,6 +38,12 @@ cd YouLikeHits-Bot
 3. Start one loop (or the Master Loop). Click it again, or **Stop**, to stop it.
 
 Only one loop runs at a time; the bot drives a single browser.
+
+### Wait between Master Loop cycles
+
+The two fields under the controls set the wait between cycles, in minutes. The bot picks a random value in that range each cycle. The values are saved to `settings.json` in the project folder when you start the Master Loop, so they survive restarts. In CLI mode the Master Loop asks for the range before starting (Enter keeps the saved one).
+
+`settings.json` also holds how many items each task handles per cycle (`websites_per_cycle`, `youtube_per_cycle`, `soundcloud_per_cycle`); edit it by hand to change those.
 
 ### CLI mode
 
@@ -79,6 +85,7 @@ YouLikeHits-Bot/
 ├── gui/app.py           # customtkinter GUI (one loop at a time, thread-safe updates)
 ├── bot_logic/
 │   ├── utils.py         # Browser factory, Chrome version detection, waits, login/points helpers
+│   ├── settings.py      # settings.json: cycle wait range and per-cycle quotas
 │   ├── earn.py          # Shared View/Listen flow for YouTube and SoundCloud
 │   ├── websites.py      # process_websites_once + loop
 │   ├── youtube.py       # process_youtube_once + loop

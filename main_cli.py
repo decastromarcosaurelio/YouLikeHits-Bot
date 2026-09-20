@@ -3,6 +3,7 @@ import sys
 import time
 
 from bot_logic.utils import YLH_BASE, setup_browser, is_browser_alive
+from bot_logic import settings as settings_mod
 
 
 def _setting_up():
@@ -23,6 +24,25 @@ def _setting_up():
         driver.quit()
     except Exception:
         pass
+
+
+def _ask_cycle_wait():
+    """Ask for the wait between master cycles; Enter keeps the saved value."""
+    current = settings_mod.load()
+    lo, hi = current["cycle_wait_min_minutes"], current["cycle_wait_max_minutes"]
+    print(f"\n[*] Wait between cycles is {lo:g}-{hi:g} minutes (random in that range).")
+    answer = input("    New min-max in minutes, e.g. 2-5 (Enter to keep): ").strip()
+    if answer:
+        parts = answer.replace(",", "-").split("-")
+        try:
+            new_lo = float(parts[0])
+            new_hi = float(parts[1]) if len(parts) > 1 and parts[1] else new_lo
+            current = settings_mod.save({**current, "cycle_wait_min_minutes": new_lo,
+                                         "cycle_wait_max_minutes": new_hi})
+            print(f"[*] Saved: {current['cycle_wait_min_minutes']:g}-{current['cycle_wait_max_minutes']:g} minutes.")
+        except (ValueError, IndexError):
+            print("[!] Could not read that; keeping the saved value.")
+    return current
 
 
 def main_menu():
@@ -58,7 +78,7 @@ def main_menu():
             start_bonus_loop(setup_browser)
         elif choice == "6":
             from bot_logic.master import start_master_loop
-            start_master_loop(setup_browser)
+            start_master_loop(setup_browser, settings=_ask_cycle_wait())
         elif choice == "0":
             print("\n[*] Exiting Autobot. Goodbye!")
             sys.exit(0)

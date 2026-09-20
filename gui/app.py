@@ -16,6 +16,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot_logic.utils import setup_browser, is_browser_alive, YLH_BASE
+from bot_logic import settings as settings_mod
 
 LOOPS = [
     # key,          label,                 icon
@@ -65,6 +66,7 @@ class BotGUI:
         self.root.geometry("960x720")
         self.root.minsize(800, 560)
 
+        self.settings = settings_mod.load()
         self.driver = None
         self.running_loop = None      # name of the single active loop, or None
         self._stop_flag = False
@@ -135,6 +137,21 @@ class BotGUI:
             left, text="⏹  Stop", command=self._stop_all, height=36,
             fg_color=STOP_COLOR, hover_color="#c0392b", corner_radius=8, state="disabled")
         self.stop_all_btn.pack(fill="x", padx=14, pady=4)
+
+        self._separator(left)
+
+        ctk.CTkLabel(left, text="Master Loop: wait between cycles (min)",
+                     font=ctk.CTkFont(size=11), text_color="#666").pack(pady=(0, 2))
+        wait_row = ctk.CTkFrame(left, fg_color="transparent")
+        wait_row.pack(pady=(0, 4))
+        self.wait_min_var = ctk.StringVar(value=f"{self.settings['cycle_wait_min_minutes']:g}")
+        self.wait_max_var = ctk.StringVar(value=f"{self.settings['cycle_wait_max_minutes']:g}")
+        ctk.CTkEntry(wait_row, width=58, justify="center", textvariable=self.wait_min_var).pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(wait_row, text="to", text_color="#888").pack(side="left")
+        ctk.CTkEntry(wait_row, width=58, justify="center", textvariable=self.wait_max_var).pack(side="left", padx=(4, 0))
+        self.wait_hint = ctk.CTkLabel(left, text="random wait in this range", font=ctk.CTkFont(size=10),
+                                      text_color="#555")
+        self.wait_hint.pack(pady=(0, 4))
 
         self._separator(left)
 
@@ -270,6 +287,9 @@ class BotGUI:
             self._log("Browser is not open. Click 'Setup Browser' first.")
             return
 
+        if name == "master" and not self._apply_wait_settings():
+            return
+
         self.running_loop = name
         self._stop_flag = False
         self._log(f"Starting {name}...")
@@ -277,6 +297,23 @@ class BotGUI:
         self._set_loop_buttons(False, except_running=name)
         self._set_status_now(STATUS_RUNNING)
         threading.Thread(target=self._run_loop, args=(name,), daemon=True).start()
+
+    def _apply_wait_settings(self):
+        """Read the wait fields, persist them, and echo the effective range. False if invalid."""
+        try:
+            lo = float(self.wait_min_var.get().replace(",", "."))
+            hi = float(self.wait_max_var.get().replace(",", "."))
+        except ValueError:
+            self._log("Wait between cycles must be numbers (minutes), e.g. 1 and 3.")
+            return False
+        self.settings = settings_mod.save({**self.settings,
+                                           "cycle_wait_min_minutes": lo,
+                                           "cycle_wait_max_minutes": hi})
+        lo, hi = self.settings["cycle_wait_min_minutes"], self.settings["cycle_wait_max_minutes"]
+        self.wait_min_var.set(f"{lo:g}")
+        self.wait_max_var.set(f"{hi:g}")
+        self._log(f"Wait between cycles set to {lo:g}-{hi:g} min.")
+        return True
 
     def _request_stop(self):
         if self.running_loop and not self._stop_flag:
@@ -289,7 +326,9 @@ class BotGUI:
     def _run_loop(self, name):
         """Worker thread: run the task until it returns, then release the UI."""
         try:
-            _task_for(name)(self.driver, lambda: self._stop_flag, self._log, self._update_points)
+            task = _task_for(name)
+            kwargs = {"settings": self.settings} if name == "master" else {}
+            task(self.driver, lambda: self._stop_flag, self._log, self._update_points, **kwargs)
         except Exception as e:
             self._log(f"[{name}] Error: {e.__class__.__name__}: {e}")
         finally:
