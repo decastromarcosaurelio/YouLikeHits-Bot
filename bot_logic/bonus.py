@@ -2,9 +2,9 @@
 
 Live site (verified 2026-09-20): `bonuspoints.php` shows "N / M hits" and a
 milestone list (10, 25, 50, 100 hits). `.bonus-pill` reads "No bonus to claim
-yet" while nothing is claimable. When a milestone is reached the site shows a
-claim control (a link/button whose text contains "claim"); the exact markup
-of that state has not been observed yet, so the selector is deliberately broad.
+yet" while nothing is claimable; once a milestone is reached it becomes
+`.bonus-pill--active` ("Unclaimed Points: +10") and an `a.buybutton` link
+("Claim 10 Points Now", href="?step=get") appears. Both states verified live.
 """
 import re
 from selenium.webdriver.common.by import By
@@ -16,7 +16,7 @@ from .utils import (
 
 PAGE = "bonuspoints.php"
 PILL_SELECTOR = ".bonus-pill"
-CLAIM_CANDIDATES = ".bonus-row a, .bonus-row button, .bonus-pill a, .bonus-pill button, a[href*='claim'], button[onclick*='claim'], .buybutton"
+CLAIM_CANDIDATES = "a.buybutton, a[href*='step=get'], .bonus-row a, .bonus-row button"
 HITS_RE = re.compile(r"(\d+)\s*/\s*(\d+)\s*hits", re.I)
 
 # Page states returned by process_bonus_once

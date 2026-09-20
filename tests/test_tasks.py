@@ -155,8 +155,10 @@ class BonusTests(unittest.TestCase):
             waiting = FakeDriver(body="10 / 25 hits\nno bonus to claim yet", elements=logged_in())
             self.assertEqual(bonus.process_bonus_once(waiting, lambda m: None, lambda: False), bonus.ALREADY_DONE)
 
-            btn = FakeElement("Claim +25 bonus")
-            ready = FakeDriver(body="25 / 25 hits", elements={**logged_in(), ".bonus-row a": [btn]})
+            # exact markup observed live on 2026-09-20
+            btn = FakeElement("Claim 10 Points Now", attrs={"href": "?step=get"})
+            ready = FakeDriver(body="12 / 25 hits\nUnclaimed Points: +10",
+                               elements={**logged_in(), "a.buybutton": [btn]})
             self.assertEqual(bonus.process_bonus_once(ready, lambda m: None, lambda: False), bonus.CLAIMED)
             self.assertEqual(btn.clicks, 1)
 
