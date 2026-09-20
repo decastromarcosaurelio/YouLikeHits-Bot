@@ -52,29 +52,8 @@ def launch_cli():
 
 
 def install_desktop_file():
-    """Install .desktop file for XFCE/Plasma integration."""
-    home = os.path.expanduser("~")
-    desktop_dir = os.path.join(home, ".local", "share", "applications")
-    os.makedirs(desktop_dir, exist_ok=True)
-
-    desktop_content = f"""[Desktop Entry]
-Type=Application
-Name=YouLikeHits Autobot
-Comment=Automate social media exchange tasks on YouLikeHits
-Exec={sys.executable} {PROJECT_DIR}/main.py
-Icon={PROJECT_DIR}/icon.png
-Terminal=false
-Categories=Network;Utility;
-StartupWMClass=youlikehits-autobot
-Keywords=youlikehits;bot;automation;social;
-"""
-    desktop_path = os.path.join(desktop_dir, "youlikehits-autobot.desktop")
-    with open(desktop_path, "w") as f:
-        f.write(desktop_content)
-    os.chmod(desktop_path, 0o755)
-
-    print(f"[*] Desktop file installed: {desktop_path}")
-    print("[*] You can now find 'YouLikeHits Autobot' in your application menu.")
+    """Install .desktop file for XFCE/Plasma integration (delegates to install.sh)."""
+    subprocess.check_call(["bash", os.path.join(PROJECT_DIR, "install.sh")])
 
 
 if __name__ == "__main__":

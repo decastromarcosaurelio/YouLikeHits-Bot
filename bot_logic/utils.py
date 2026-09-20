@@ -1,6 +1,13 @@
+"""Shared helpers: browser factory, waits, login/points detection.
+
+`setup_browser` is the ONLY browser factory in the project.
+"""
 import os
 import re
+import random
+import subprocess
 import time
+
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -9,131 +16,235 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 YLH_BASE = "https://www.youlikehits.com"
 
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_PROFILE_DIR = os.path.join(PROJECT_DIR, "chrome_profile")
+
+
+# ── Chrome version detection ──────────────────────────────────────────
+
+def parse_chrome_major(version_output):
+    """Extract the major version from `chrome --version` output.
+
+    >>> parse_chrome_major("Google Chrome 153.0.8010.52 ")
+    153
+    >>> parse_chrome_major("Chromium 128.0.6613.84 snap")
+    128
+    >>> parse_chrome_major("garbage") is None
+    True
+    """
+    if not version_output:
+        return None
+    match = re.search(r"(\d+)\.\d+\.\d+", version_output)
+    return int(match.group(1)) if match else None
+
+
+def detect_chrome_major(executable_path=None):
+    """Return the installed Chrome major version, or None if it can't be read.
+
+    undetected-chromedriver must download a chromedriver whose major matches
+    the browser. Pinning a number in code breaks every time Chrome updates;
+    asking the binary is always right.
+    """
+    try:
+        binary = executable_path or uc.find_chrome_executable()
+        if not binary:
+            return None
+        out = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10
+        ).stdout
+        return parse_chrome_major(out)
+    except Exception:
+        return None
+
 
 def setup_browser(profile_dir=None):
-    """Initialize a persistent Chrome browser instance."""
+    """Initialize a persistent Chrome browser instance.
+
+    Returns the driver, or None on failure (error is printed).
+    """
     if profile_dir is None:
-        profile_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chrome_profile")
+        profile_dir = DEFAULT_PROFILE_DIR
     print(f"[*] Initializing browser with profile: {profile_dir}...")
+
+    major = detect_chrome_major()
+    if major:
+        print(f"[*] Detected Chrome major version: {major}")
+    else:
+        print("[!] Could not detect Chrome version; letting chromedriver auto-detect.")
+
     options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile_dir}")
     options.add_argument("--disable-popup-blocking")
     try:
-        driver = uc.Chrome(options=options, version_main=150)
-        return driver
+        return uc.Chrome(options=options, version_main=major)
     except Exception as e:
         print(f"[!] Error initializing Chrome: {e}")
         return None
 
 
+# ── Waiting ───────────────────────────────────────────────────────────
+
+def wait_unless_stopped(seconds, is_stopped=None, step=1.0):
+    """Sleep up to `seconds`, waking early if `is_stopped()` becomes true.
+
+    Returns True if the full duration elapsed, False if interrupted.
+    """
+    if is_stopped is None:
+        time.sleep(seconds)
+        return True
+    deadline = time.monotonic() + seconds
+    while True:
+        if is_stopped():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(step, remaining))
+
+
+def random_delay(min_sec=2, max_sec=5, is_stopped=None):
+    """Wait a random duration between actions (interruptible)."""
+    delay = random.uniform(min_sec, max_sec)
+    wait_unless_stopped(delay, is_stopped)
+    return delay
+
+
 def wait_for_element(driver, by, value, timeout=10):
-    """Wait for an element and return it."""
+    """Wait for an element and return it, or None on timeout."""
     try:
-        element = WebDriverWait(driver, timeout).until(
+        return WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located((by, value))
         )
-        return element
     except TimeoutException:
         return None
 
 
 def wait_for_clickable(driver, by, value, timeout=10):
-    """Wait for an element to be clickable and return it."""
+    """Wait for an element to be clickable and return it, or None on timeout."""
     try:
-        element = WebDriverWait(driver, timeout).until(
+        return WebDriverWait(driver, timeout).until(
             EC.element_to_be_clickable((by, value))
         )
-        return element
     except TimeoutException:
         return None
 
 
-def is_logged_in(driver):
-    """Check if user is logged in by looking for dashboard indicators."""
+# ── Page helpers ──────────────────────────────────────────────────────
+
+def body_text(driver):
+    """Lowercased page body text, or '' if unavailable."""
     try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        if "not logged in" in body_text.lower():
+        return driver.find_element(By.TAG_NAME, "body").text.lower()
+    except Exception:
+        return ""
+
+
+def is_browser_alive(driver):
+    """True while the browser session answers; False once it's been closed."""
+    if driver is None:
+        return False
+    try:
+        _ = driver.window_handles
+        return True
+    except Exception:
+        return False
+
+
+def is_logged_in(driver):
+    """Check if user is logged in by looking for dashboard indicators.
+
+    NOTE: selectors are unverified against the live site; adjust if YLH changes.
+    """
+    try:
+        if "not logged in" in body_text(driver):
             return False
-        # Check for points display or profile elements
         driver.find_element(By.CSS_SELECTOR, ".points, #points, [class*='point']")
         return True
     except NoSuchElementException:
         return False
+    except Exception:
+        return False
 
 
 def get_points(driver):
-    """Attempt to read current points balance."""
+    """Attempt to read current points balance. Returns int or None."""
     try:
-        # Try various selectors that YLH might use
-        selectors = [".points", "#points", "[class*='point']", ".pointsdisplay"]
-        for sel in selectors:
+        for sel in (".points", "#points", "[class*='point']", ".pointsdisplay"):
             try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                text = el.text.strip()
-                nums = re.findall(r'\d+', text)
-                if nums:
-                    return int(nums[0])
+                text = driver.find_element(By.CSS_SELECTOR, sel).text.strip()
             except NoSuchElementException:
                 continue
-        # Fallback: search body text for points pattern
-        body = driver.find_element(By.TAG_NAME, "body").text
-        match = re.search(r'(\d[\d,]*)\s*[Pp]oints?', body)
+            nums = re.findall(r"\d+", text)
+            if nums:
+                return int(nums[0])
+        match = re.search(r"(\d[\d,]*)\s*[Pp]oints?", driver.find_element(By.TAG_NAME, "body").text)
         if match:
-            return int(match.group(1).replace(',', ''))
+            return int(match.group(1).replace(",", ""))
     except Exception:
         pass
     return None
 
 
-def solve_math_captcha(driver, image_selector="img[alt='Enter The Numbers']",
-                       input_selector="input[name='postcaptcha']"):
-    """Solve the math-based captcha using OCR-like approach.
-    
-    YLH captchas are simple math expressions like '2+3' or '5*4'.
-    We try to read the image and evaluate.
-    """
-    try:
-        captcha_img = wait_for_element(driver, By.CSS_SELECTOR, image_selector, timeout=3)
-        if not captcha_img:
-            return False
-
-        # For Selenium, we can't do OCR directly. 
-        # Instead, we'll use a trick: download the image and use a simple heuristic.
-        # YLH captchas are 3-character math like "2+3" or "5*4"
-        # The simplest approach: alert the user and pause.
-        print("[!] Captcha detected. Please solve it manually in the browser window.")
-        print("[!] Waiting 30 seconds for manual solve...")
-        time.sleep(30)
-        return True
-    except Exception:
-        return False
-
-
-def random_delay(min_sec=2, max_sec=5):
-    """Wait a random duration between actions."""
-    import random
-    delay = random.uniform(min_sec, max_sec)
-    time.sleep(delay)
-    return delay
-
-
-def navigate_to(driver, path):
-    """Navigate to a YLH page."""
-    url = f"{YLH_BASE}/{path}"
-    driver.get(url)
-    time.sleep(2)
+def navigate_to(driver, path, settle=2):
+    """Navigate to a YLH page and give it a moment to settle."""
+    driver.get(f"{YLH_BASE}/{path}")
+    time.sleep(settle)
 
 
 def check_service_unavailable(driver):
-    """Check for 503 errors and reload if needed."""
-    try:
-        body = driver.find_element(By.TAG_NAME, "body").text
-        if "503" in body or "service unavailable" in body.lower():
-            print("[!] 503 Service Unavailable. Reloading...")
-            time.sleep(5)
-            driver.refresh()
-            time.sleep(3)
-            return True
-    except Exception:
-        pass
+    """Detect a 503 page and reload. Returns True if a reload happened."""
+    text = body_text(driver)
+    if "503" in text or "service unavailable" in text:
+        print("[!] 503 Service Unavailable. Reloading...")
+        time.sleep(5)
+        driver.refresh()
+        time.sleep(3)
+        return True
     return False
+
+
+def run_cli_task(title, setup_browser_func, task_func):
+    """Open a browser and run a GUI-style task in the terminal until Ctrl+C.
+
+    `task_func(driver, is_stopped, log_func, update_points_func)` is the
+    same function the GUI calls, so CLI and GUI never diverge.
+    """
+    print(f"\n[*] Starting {title}...")
+    driver = setup_browser_func()
+    if not driver:
+        print("[!] Failed to initialize browser.")
+        return
+
+    def log(msg):
+        print(f"[*] {msg}")
+
+    def update_points(points):
+        if points is not None:
+            print(f"[*] Points: {points}")
+
+    try:
+        task_func(driver, lambda: False, log, update_points)
+    except KeyboardInterrupt:
+        print(f"\n[*] {title} stopped.")
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def wait_for_manual_captcha(driver, log, is_stopped=None, selector="img[src*='captcha']", seconds=30):
+    """If a captcha image is on the page, pause so the user can solve it.
+
+    YLH captchas are not solved automatically. Returns True if a captcha was
+    present (caller should re-check the page afterwards).
+    """
+    try:
+        driver.find_element(By.CSS_SELECTOR, selector)
+    except NoSuchElementException:
+        return False
+    except Exception:
+        return False
+    log(f"Captcha detected. Please solve it in the browser window ({seconds}s pause)...")
+    wait_unless_stopped(seconds, is_stopped)
+    return True

@@ -4,13 +4,12 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "YouLikeHits Autobot | Free Social Media Growth",
   description:
-    "Automate YouTube views, TikTok followers, SoundCloud plays, and more on YouLikeHits. Open-source Python bot with GUI. Works on XFCE, KDE Plasma, and any Linux desktop.",
+    "Automate website views, YouTube views, SoundCloud plays and the daily bonus on YouLikeHits. Open-source Python bot with GUI and CLI. Works on XFCE, KDE Plasma, and any Linux desktop.",
   keywords: [
     "youlikehits",
     "bot",
     "automation",
     "youtube views",
-    "tiktok followers",
     "soundcloud plays",
     "social media",
     "free",

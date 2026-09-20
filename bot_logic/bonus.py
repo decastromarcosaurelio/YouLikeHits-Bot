@@ -1,115 +1,73 @@
-import time
-import random
+"""Daily bonus claimer.
+
+One page-processing function, three callers (GUI loop, CLI loop, master).
+"""
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException, WebDriverException
+from selenium.common.exceptions import WebDriverException, NoSuchElementException
 from .utils import (
-    wait_for_element, wait_for_clickable, is_logged_in,
-    navigate_to, check_service_unavailable, random_delay, get_points
+    is_logged_in, navigate_to, check_service_unavailable, random_delay,
+    get_points, body_text, wait_unless_stopped, run_cli_task,
 )
+
+PAGE = "bonuspoints.php"
+CLAIM_SELECTOR = ".buybutton, button[onclick*='buy'], a[onclick*='buy']"
+
+# Page states returned by process_bonus_once
+CLAIMED = "claimed"
+ALREADY_DONE = "already_done"
+NOT_AVAILABLE = "not_available"
+
+
+def process_bonus_once(driver, log, is_stopped):
+    """Check the bonus page once and claim if possible. Returns a page state."""
+    if check_service_unavailable(driver):
+        navigate_to(driver, PAGE)
+
+    text = body_text(driver)
+    if "you have made" in text and "hits out of" in text:
+        return ALREADY_DONE
+
+    try:
+        claim_btn = driver.find_element(By.CSS_SELECTOR, CLAIM_SELECTOR)
+        if claim_btn.is_displayed():
+            log("Claim button found! Clicking...")
+            claim_btn.click()
+            wait_unless_stopped(3, is_stopped)
+            log("Daily bonus claimed!")
+            random_delay(2, 5, is_stopped)
+            return CLAIMED
+    except NoSuchElementException:
+        pass
+    except WebDriverException as e:
+        log(f"Error claiming bonus: {e.__class__.__name__}")
+    return NOT_AVAILABLE
 
 
 def _run_bonus_task(driver, is_stopped, log_func, update_points_func):
-    """Daily bonus task for GUI integration."""
+    """Daily bonus loop (GUI and CLI share this)."""
     log_func("Starting daily bonus claimer...")
-    navigate_to(driver, "bonuspoints.php")
-    time.sleep(2)
+    navigate_to(driver, PAGE)
 
     if not is_logged_in(driver):
         log_func("Not logged in! Please log in first.")
         return
 
     while not is_stopped():
-        if check_service_unavailable(driver):
-            navigate_to(driver, "bonuspoints.php")
-
-        points = get_points(driver)
-        update_points_func(points)
-
-        try:
-            body = driver.find_element(By.TAG_NAME, "body").text
-            if "you have made" in body.lower() and "hits out of" in body.lower():
-                log_func("Daily bonus already claimed or not enough hits yet.")
-                log_func("Waiting 5 minutes before checking again...")
-                time.sleep(300)
-                driver.refresh()
-                time.sleep(3)
-                continue
-        except Exception:
-            pass
-
-        try:
-            claim_btn = driver.find_element(By.CSS_SELECTOR, ".buybutton, button[onclick*='buy'], a[onclick*='buy']")
-            if claim_btn and claim_btn.is_displayed():
-                log_func("Claim button found! Clicking...")
-                claim_btn.click()
-                time.sleep(3)
-                log_func("Daily bonus claimed!")
-                random_delay(2, 5)
-                continue
-        except NoSuchElementException:
-            pass
-
-        log_func("No claim button available. Waiting 2 minutes...")
-        time.sleep(120)
-        driver.refresh()
-        time.sleep(3)
+        update_points_func(get_points(driver))
+        state = process_bonus_once(driver, log_func, is_stopped)
+        if is_stopped():
+            break
+        if state == ALREADY_DONE:
+            log_func("Daily bonus already claimed or not enough hits yet. Waiting 5 minutes...")
+            wait_unless_stopped(300, is_stopped)
+        elif state == NOT_AVAILABLE:
+            log_func("No claim button available. Waiting 2 minutes...")
+            wait_unless_stopped(120, is_stopped)
+        navigate_to(driver, PAGE)
 
     log_func("Daily bonus claimer stopped.")
 
 
 def start_bonus_loop(setup_browser_func):
-    """Main loop for daily bonus points claiming (CLI mode)."""
-    print("\n[*] Starting Daily Bonus Claimer...")
-    driver = setup_browser_func()
-    if not driver:
-        print("[!] Failed to initialize browser.")
-        return
-
-    try:
-        navigate_to(driver, "bonuspoints.php")
-        time.sleep(2)
-
-        if not is_logged_in(driver):
-            print("[!] Not logged in! Please use 'Setting Up' first.")
-            return
-
-        while True:
-            if check_service_unavailable(driver):
-                navigate_to(driver, "bonuspoints.php")
-
-            try:
-                body = driver.find_element(By.TAG_NAME, "body").text
-                if "you have made" in body.lower() and "hits out of" in body.lower():
-                    print("[*] Daily bonus already claimed or not enough hits yet.")
-                    print("[*] Waiting 5 minutes before checking again...")
-                    time.sleep(300)
-                    driver.refresh()
-                    time.sleep(3)
-                    continue
-            except Exception:
-                pass
-
-            try:
-                claim_btn = driver.find_element(By.CSS_SELECTOR, ".buybutton, button[onclick*='buy'], a[onclick*='buy']")
-                if claim_btn and claim_btn.is_displayed():
-                    print("[*] Claim button found! Clicking...")
-                    claim_btn.click()
-                    time.sleep(3)
-                    print("[*] Daily bonus claimed!")
-                    random_delay(2, 5)
-                    continue
-            except NoSuchElementException:
-                pass
-
-            print("[*] No claim button available. Waiting 2 minutes...")
-            time.sleep(120)
-            driver.refresh()
-            time.sleep(3)
-
-    except KeyboardInterrupt:
-        print("\n[*] Daily Bonus Claimer stopped.")
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+    """CLI entry point."""
+    run_cli_task("Daily Bonus Claimer", setup_browser_func, _run_bonus_task)

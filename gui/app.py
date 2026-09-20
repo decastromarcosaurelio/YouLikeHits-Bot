@@ -3,6 +3,9 @@
 
 Compatible with XFCE, KDE Plasma, GNOME, and any X11/Wayland desktop.
 Uses customtkinter (tkinter) which is toolkit-agnostic.
+
+Threading model: bot tasks run in worker threads; every widget update is
+marshalled onto the Tk main loop via `root.after`.
 """
 import customtkinter as ctk
 import threading
@@ -12,12 +15,48 @@ import os
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bot_logic.utils import setup_browser, YLH_BASE
+from bot_logic.utils import setup_browser, is_browser_alive, YLH_BASE
+
+LOOPS = [
+    # key,          label,                 icon
+    ("websites",   "Website Views",   "🔗"),
+    ("youtube",    "YouTube Views",   "▶"),
+    ("soundcloud", "SoundCloud Plays", "🎵"),
+    ("bonus",      "Daily Bonus",     "🎁"),
+    ("master",     "Master Loop (All)", "🔄"),
+]
+LOOP_COLOR = {"master": "#6c3483"}
+LOOP_HOVER = {"master": "#8e44ad"}
+DEFAULT_COLOR = "#1a5276"
+DEFAULT_HOVER = "#2471a3"
+STOP_COLOR = "#922b21"
+
+STATUS_IDLE = ("Idle", "#888888")
+STATUS_LOGIN = ("Login Mode", "#ffaa00")
+STATUS_READY = ("Ready", "#00ff88")
+STATUS_RUNNING = ("Running", "#00d4ff")
+STATUS_ERROR = ("Browser Error", "#ff4444")
+STATUS_CLOSED = ("Browser Closed", "#ff4444")
+
+
+def _task_for(name):
+    if name == "websites":
+        from bot_logic.websites import _run_website_task as task
+    elif name == "youtube":
+        from bot_logic.youtube import _run_youtube_task as task
+    elif name == "soundcloud":
+        from bot_logic.soundcloud import _run_soundcloud_task as task
+    elif name == "bonus":
+        from bot_logic.bonus import _run_bonus_task as task
+    elif name == "master":
+        from bot_logic.master import _run_master_task as task
+    else:
+        raise ValueError(f"unknown loop: {name}")
+    return task
 
 
 class BotGUI:
     def __init__(self):
-        # Theme - works universally on XFCE/Plasma/GNOME
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -26,22 +65,14 @@ class BotGUI:
         self.root.geometry("960x720")
         self.root.minsize(800, 560)
 
-        # Try to set window icon (works on XFCE + Plasma)
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "icon.png")
-        if os.path.exists(icon_path):
-            try:
-                self.root.iconphoto(True, ctk.CTkImage(light_image=None, dark_image=None))
-            except Exception:
-                pass
-
         self.driver = None
-        self.browser_ready = False
-        self.running_loops = {}
-        self.log_messages = []
+        self.running_loop = None      # name of the single active loop, or None
+        self._stop_flag = False
         self.loop_buttons = {}
 
         self._build_ui()
         self._set_window_manager_hints()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _set_window_manager_hints(self):
         """Set WM_CLASS for XFCE/Plasma taskbar grouping."""
@@ -50,248 +81,244 @@ class BotGUI:
         except Exception:
             pass
 
+    # ── UI ────────────────────────────────────────────────────────────
     def _build_ui(self):
-        # ── Header ──
         header = ctk.CTkFrame(self.root, fg_color="#0f3460", corner_radius=0, height=56)
         header.pack(fill="x")
         header.pack_propagate(False)
 
-        ctk.CTkLabel(
-            header, text="⚡ YouLikeHits Autobot",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color="#e0e0e0"
-        ).pack(side="left", padx=20)
+        ctk.CTkLabel(header, text="⚡ YouLikeHits Autobot",
+                     font=ctk.CTkFont(size=22, weight="bold"),
+                     text_color="#e0e0e0").pack(side="left", padx=20)
 
-        self.status_label = ctk.CTkLabel(
-            header, text="● Idle",
-            font=ctk.CTkFont(size=13),
-            text_color="#888888"
-        )
+        self.status_label = ctk.CTkLabel(header, text="● Idle",
+                                         font=ctk.CTkFont(size=13), text_color="#888888")
         self.status_label.pack(side="right", padx=20)
 
-        self.points_label = ctk.CTkLabel(
-            header, text="💰 -- pts",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#00ff88"
-        )
+        self.points_label = ctk.CTkLabel(header, text="💰 -- pts",
+                                         font=ctk.CTkFont(size=14, weight="bold"),
+                                         text_color="#00ff88")
         self.points_label.pack(side="right", padx=10)
 
-        # ── Body ──
         body = ctk.CTkFrame(self.root, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # ── Left Panel: Controls ──
         left = ctk.CTkFrame(body, width=260, fg_color="#16213e", corner_radius=12)
         left.pack(side="left", fill="y", padx=(0, 8))
         left.pack_propagate(False)
 
         ctk.CTkLabel(left, text="Controls", font=ctk.CTkFont(size=15, weight="bold"),
-                      text_color="#00d4ff").pack(pady=(16, 8))
+                     text_color="#00d4ff").pack(pady=(16, 8))
 
-        # Browser
         self.setup_btn = ctk.CTkButton(
-            left, text="🌐  Setup Browser (Login)",
-            command=self._setup_browser, height=42,
-            fg_color="#0f3460", hover_color="#1a5276", corner_radius=8
-        )
+            left, text="🌐  Setup Browser (Login)", command=self._setup_browser,
+            height=42, fg_color="#0f3460", hover_color="#1a5276", corner_radius=8)
         self.setup_btn.pack(fill="x", padx=14, pady=4)
 
-        ctk.CTkFrame(left, height=1, fg_color="#333").pack(fill="x", padx=14, pady=10)
+        self._separator(left)
 
-        # Loop toggles
-        loops = [
-            ("websites",   "🔗  Website Views",   "#1a5276"),
-            ("youtube",    "▶  YouTube Views",     "#1a5276"),
-            ("soundcloud", "🎵  SoundCloud Plays", "#1a5276"),
-            ("bonus",      "🎁  Daily Bonus",      "#1a5276"),
-        ]
-        for key, label, color in loops:
+        for key, label, icon in LOOPS:
+            if key == "master":
+                self._separator(left)
             btn = ctk.CTkButton(
-                left, text=label, height=36,
+                left, text=f"{icon}  {label}", height=42 if key == "master" else 36,
                 command=lambda k=key: self._toggle_loop(k),
-                fg_color=color, hover_color="#2471a3", corner_radius=8,
-                state="disabled"
-            )
+                fg_color=LOOP_COLOR.get(key, DEFAULT_COLOR),
+                hover_color=LOOP_HOVER.get(key, DEFAULT_HOVER),
+                corner_radius=8, state="disabled")
             btn.pack(fill="x", padx=14, pady=3)
             self.loop_buttons[key] = btn
 
-        ctk.CTkFrame(left, height=1, fg_color="#333").pack(fill="x", padx=14, pady=10)
+        self._separator(left)
 
-        self.master_btn = ctk.CTkButton(
-            left, text="🔄  Master Loop (All)",
-            command=lambda: self._toggle_loop("master"), height=42,
-            fg_color="#6c3483", hover_color="#8e44ad", corner_radius=8,
-            state="disabled"
-        )
-        self.master_btn.pack(fill="x", padx=14, pady=4)
-        self.loop_buttons["master"] = self.master_btn
-
-        ctk.CTkFrame(left, height=1, fg_color="#333").pack(fill="x", padx=14, pady=10)
-
-        # Stop all
         self.stop_all_btn = ctk.CTkButton(
-            left, text="⏹  Stop All",
-            command=self._stop_all, height=36,
-            fg_color="#922b21", hover_color="#c0392b", corner_radius=8,
-            state="disabled"
-        )
+            left, text="⏹  Stop", command=self._stop_all, height=36,
+            fg_color=STOP_COLOR, hover_color="#c0392b", corner_radius=8, state="disabled")
         self.stop_all_btn.pack(fill="x", padx=14, pady=4)
 
-        # Points card
-        ctk.CTkFrame(left, height=1, fg_color="#333").pack(fill="x", padx=14, pady=10)
+        self._separator(left)
 
         ctk.CTkLabel(left, text="Points Balance", font=ctk.CTkFont(size=11),
-                      text_color="#666").pack(pady=(4, 0))
-        self.points_big = ctk.CTkLabel(
-            left, text="--",
-            font=ctk.CTkFont(size=32, weight="bold"),
-            text_color="#00ff88"
-        )
+                     text_color="#666").pack(pady=(4, 0))
+        self.points_big = ctk.CTkLabel(left, text="--",
+                                       font=ctk.CTkFont(size=32, weight="bold"),
+                                       text_color="#00ff88")
         self.points_big.pack(pady=(0, 16))
 
-        # ── Right Panel: Log ──
         right = ctk.CTkFrame(body, fg_color="#16213e", corner_radius=12)
         right.pack(side="right", fill="both", expand=True)
 
         ctk.CTkLabel(right, text="Activity Log", font=ctk.CTkFont(size=15, weight="bold"),
-                      text_color="#00d4ff").pack(pady=(12, 4))
+                     text_color="#00d4ff").pack(pady=(12, 4))
 
         self.log_textbox = ctk.CTkTextbox(
             right, font=ctk.CTkFont(family="monospace", size=12),
-            fg_color="#0d1117", text_color="#c9d1d9",
-            corner_radius=8, wrap="word"
-        )
+            fg_color="#0d1117", text_color="#c9d1d9", corner_radius=8, wrap="word")
         self.log_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.log_textbox.configure(state="disabled")
 
-        # ── Footer ──
         footer = ctk.CTkFrame(self.root, fg_color="#0f3460", corner_radius=0, height=28)
         footer.pack(fill="x", side="bottom")
         footer.pack_propagate(False)
         ctk.CTkLabel(footer, text="YouLikeHits Autobot  |  Use responsibly",
-                      font=ctk.CTkFont(size=10), text_color="#555").pack(pady=4)
+                     font=ctk.CTkFont(size=10), text_color="#555").pack(pady=4)
 
-    # ── Logging ──
+    @staticmethod
+    def _separator(parent):
+        ctk.CTkFrame(parent, height=1, fg_color="#333").pack(fill="x", padx=14, pady=10)
+
+    # ── Thread-safe UI helpers (safe to call from any thread) ─────────
+    def _ui(self, fn, *args):
+        """Run `fn(*args)` on the Tk main thread."""
+        try:
+            self.root.after(0, lambda: fn(*args))
+        except RuntimeError:
+            pass  # main loop already gone
+
     def _log(self, msg):
-        ts = datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}\n"
-        self.log_messages.append(line)
+        self._ui(self._log_now, msg)
+
+    def _log_now(self, msg):
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"
         self.log_textbox.configure(state="normal")
         self.log_textbox.insert("end", line)
         self.log_textbox.see("end")
         self.log_textbox.configure(state="disabled")
 
-    # ── Browser ──
+    def _update_points(self, points):
+        if points is not None:
+            self._ui(self._update_points_now, points)
+
+    def _update_points_now(self, points):
+        self.points_label.configure(text=f"💰 {points} pts")
+        self.points_big.configure(text=str(points))
+
+    def _set_status(self, status):
+        self._ui(self._set_status_now, status)
+
+    def _set_status_now(self, status):
+        text, color = status
+        self.status_label.configure(text=f"● {text}", text_color=color)
+
+    def _set_loop_buttons(self, enabled, except_running=None):
+        """Enable/disable loop buttons. The running one (if any) stays enabled as a Stop."""
+        for key, btn in self.loop_buttons.items():
+            if key == except_running:
+                btn.configure(state="normal")
+            else:
+                btn.configure(state="normal" if enabled else "disabled")
+        self.stop_all_btn.configure(state="normal" if except_running else "disabled")
+
+    def _reset_button_label(self, key):
+        icon, label = next((i, l) for k, l, i in LOOPS if k == key)
+        self.loop_buttons[key].configure(
+            text=f"{icon}  {label}", fg_color=LOOP_COLOR.get(key, DEFAULT_COLOR))
+
+    # ── Browser ───────────────────────────────────────────────────────
     def _setup_browser(self):
         self._log("Opening browser for login...")
-        self._set_status("Login Mode", "#ffaa00")
+        self._set_status(STATUS_LOGIN)
         self.setup_btn.configure(state="disabled")
 
         def _run():
+            driver = setup_browser()
+            if not driver:
+                self._log("Failed to initialize browser. Check the terminal for details.")
+                self._set_status(STATUS_ERROR)
+                self._ui(lambda: self.setup_btn.configure(state="normal"))
+                return
+            self.driver = driver
             try:
-                self.driver = setup_browser()
-                if self.driver:
-                    self.driver.get(f"{YLH_BASE}/login.php")
-                    self._log("Browser opened. Log in to YouLikeHits.")
-                    self._log("Close the browser window when done.")
-                    try:
-                        while True:
-                            _ = self.driver.window_handles
-                            time.sleep(1)
-                    except Exception:
-                        pass
-                    self.browser_ready = True
-                    self._log("Login complete. Loops enabled.")
-                    self._set_status("Ready", "#00ff88")
-                    self._enable_buttons()
-                else:
-                    self._log("Failed to initialize browser.")
-                    self._set_status("Browser Error", "#ff4444")
+                driver.get(f"{YLH_BASE}/login.php")
             except Exception as e:
-                self._log(f"Error: {e}")
-            finally:
-                self.setup_btn.configure(state="normal")
+                self._log(f"Could not open login page: {e.__class__.__name__}")
+            self._log("Browser opened. Log in to YouLikeHits, then start a loop.")
+            self._log("Keep the browser window open while the bot runs.")
+            self._set_status(STATUS_READY)
+            self._ui(self._set_loop_buttons, True)
+            self._watch_browser(driver)
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _enable_buttons(self):
-        for btn in self.loop_buttons.values():
-            btn.configure(state="normal")
-        self.stop_all_btn.configure(state="normal")
+    def _watch_browser(self, driver):
+        """Block (in the worker thread) until the browser is closed, then lock the UI."""
+        while is_browser_alive(driver):
+            time.sleep(2)
+        if self.driver is driver:
+            self.driver = None
+            self._stop_flag = True
+            self._log("Browser was closed. Click 'Setup Browser' to reopen it.")
+            self._set_status(STATUS_CLOSED)
+            self._ui(self._on_browser_gone)
 
-    def _set_status(self, text, color):
-        self.status_label.configure(text=f"● {text}", text_color=color)
+    def _on_browser_gone(self):
+        if self.running_loop:
+            self._reset_button_label(self.running_loop)
+            self.running_loop = None
+        self._set_loop_buttons(False)
+        self.setup_btn.configure(state="normal")
 
-    # ── Loop control ──
+    # ── Loop control (main thread) ────────────────────────────────────
     def _toggle_loop(self, name):
-        if name in self.running_loops:
-            self.running_loops[name]["stop"] = True
-            del self.running_loops[name]
-            btn = self.loop_buttons[name]
-            display = name.replace("_", " ").title()
-            if name == "master":
-                btn.configure(text=f"🔄  Master Loop (All)", fg_color="#6c3483")
-            else:
-                icons = {"websites": "🔗", "youtube": "▶", "soundcloud": "🎵", "bonus": "🎁"}
-                btn.configure(text=f"{icons.get(name, '')}  {display}", fg_color="#1a5276")
-            self._log(f"{name} stopped.")
-        else:
-            self.running_loops[name] = {"stop": False}
-            self._log(f"Starting {name}...")
-            btn = self.loop_buttons[name]
-            btn.configure(text=f"⏹  Stop {name.replace('_', ' ').title()}", fg_color="#922b21")
+        if self.running_loop == name:
+            self._request_stop()
+            return
+        if self.running_loop:
+            self._log(f"'{self.running_loop}' is still running. Stop it first.")
+            return
+        if not is_browser_alive(self.driver):
+            self._log("Browser is not open. Click 'Setup Browser' first.")
+            return
 
-            threading.Thread(target=self._run_loop, args=(name,), daemon=True).start()
+        self.running_loop = name
+        self._stop_flag = False
+        self._log(f"Starting {name}...")
+        self.loop_buttons[name].configure(text=f"⏹  Stop {name}", fg_color=STOP_COLOR)
+        self._set_loop_buttons(False, except_running=name)
+        self._set_status_now(STATUS_RUNNING)
+        threading.Thread(target=self._run_loop, args=(name,), daemon=True).start()
 
-        any_running = len(self.running_loops) > 0
-        self._set_status("Running" if any_running else "Ready",
-                         "#00d4ff" if any_running else "#00ff88")
-
-    def _run_loop(self, name):
-        is_stopped = lambda: self.running_loops.get(name, {}).get("stop", True)
-        try:
-            if name == "websites":
-                from bot_logic.websites import _run_website_task
-                _run_website_task(self.driver, is_stopped, self._log, self._update_points)
-            elif name == "youtube":
-                from bot_logic.youtube import _run_youtube_task
-                _run_youtube_task(self.driver, is_stopped, self._log, self._update_points)
-            elif name == "soundcloud":
-                from bot_logic.soundcloud import _run_soundcloud_task
-                _run_soundcloud_task(self.driver, is_stopped, self._log, self._update_points)
-            elif name == "bonus":
-                from bot_logic.bonus import _run_bonus_task
-                _run_bonus_task(self.driver, is_stopped, self._log, self._update_points)
-            elif name == "master":
-                from bot_logic.master import _run_master_task
-                _run_master_task(self.driver, is_stopped, self._log, self._update_points)
-        except Exception as e:
-            self._log(f"[{name}] Error: {e}")
-
-    def _update_points(self, points):
-        if points is not None:
-            self.points_label.configure(text=f"💰 {points} pts")
-            self.points_big.configure(text=str(points))
+    def _request_stop(self):
+        if self.running_loop and not self._stop_flag:
+            self._stop_flag = True
+            self._log(f"Stopping {self.running_loop}...")
 
     def _stop_all(self):
-        for name in list(self.running_loops):
-            self.running_loops[name]["stop"] = True
-            del self.running_loops[name]
-        for key, btn in self.loop_buttons.items():
-            if key == "master":
-                btn.configure(text="🔄  Master Loop (All)", fg_color="#6c3483")
-            else:
-                icons = {"websites": "🔗", "youtube": "▶", "soundcloud": "🎵", "bonus": "🎁"}
-                display = key.replace("_", " ").title()
-                btn.configure(text=f"{icons.get(key, '')}  {display}", fg_color="#1a5276")
-        self._set_status("Ready", "#00ff88")
-        self._log("All loops stopped.")
+        self._request_stop()
+
+    def _run_loop(self, name):
+        """Worker thread: run the task until it returns, then release the UI."""
+        try:
+            _task_for(name)(self.driver, lambda: self._stop_flag, self._log, self._update_points)
+        except Exception as e:
+            self._log(f"[{name}] Error: {e.__class__.__name__}: {e}")
+        finally:
+            self._ui(self._on_loop_finished, name)
+
+    def _on_loop_finished(self, name):
+        if self.running_loop == name:
+            self.running_loop = None
+        self._reset_button_label(name)
+        alive = is_browser_alive(self.driver)
+        self._set_loop_buttons(alive)
+        self._set_status_now(STATUS_READY if alive else STATUS_CLOSED)
+
+    # ── Lifecycle ─────────────────────────────────────────────────────
+    def _on_close(self):
+        self._stop_flag = True
+        driver, self.driver = self.driver, None
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        self.root.destroy()
 
     def run(self):
-        self._log("YouLikeHits Autobot ready.")
-        self._log("Click 'Setup Browser' to log in first.")
+        self._log_now("YouLikeHits Autobot ready.")
+        self._log_now("Click 'Setup Browser' to log in first.")
         self.root.mainloop()
 
 
 if __name__ == "__main__":
-    app = BotGUI()
-    app.run()
+    BotGUI().run()

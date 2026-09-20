@@ -7,7 +7,7 @@ const FEATURES = [
   {
     icon: "▶",
     title: "YouTube Views",
-    desc: "Watch YouTube videos for points. Supports captcha solving and auto-submit.",
+    desc: "Watch YouTube videos for points. Auto-submits after the timer; pauses for you when a captcha appears.",
   },
   {
     icon: "🎵",
@@ -31,15 +31,7 @@ const FEATURES = [
   },
 ];
 
-const PLATFORMS = [
-  "YouTube",
-  "TikTok",
-  "Twitter / X",
-  "SoundCloud",
-  "Pinterest",
-  "Twitch",
-  "Websites",
-];
+const PLATFORMS = ["Website Views", "YouTube Views", "SoundCloud Plays", "Daily Bonus"];
 
 export default function Home() {
   return (
@@ -55,12 +47,12 @@ export default function Home() {
         </h1>
         <p className="mx-auto mb-8 max-w-2xl text-lg text-gray-400">
           Free, open-source Python bot that automates social media exchange
-          tasks on YouLikeHits. Earn points while you sleep. Works on XFCE,
-          KDE Plasma, and any Linux desktop.
+          tasks on YouLikeHits: website views, YouTube views, SoundCloud plays
+          and the daily bonus. Works on XFCE, KDE Plasma, and any Linux desktop.
         </p>
         <div className="flex flex-wrap justify-center gap-4">
           <a
-            href="https://github.com"
+            href="https://github.com/techengineerworkstation/YouLikeHits-Bot"
             className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white transition hover:bg-blue-500"
           >
             View on GitHub
@@ -77,7 +69,7 @@ export default function Home() {
       {/* Supported Platforms */}
       <section className="border-t border-gray-800 px-6 py-16">
         <h2 className="mb-8 text-center text-2xl font-bold">
-          Supported Platforms
+          Automated Tasks
         </h2>
         <div className="mx-auto flex max-w-3xl flex-wrap justify-center gap-3">
           {PLATFORMS.map((p) => (
@@ -117,7 +109,7 @@ export default function Home() {
               1. Clone &amp; install
             </h3>
             <pre className="overflow-x-auto rounded-lg bg-gray-950 p-4 text-sm text-gray-300">
-              <code>{`git clone https://github.com/YOUR_USER/YouLikeHits-Bot.git
+              <code>{`git clone https://github.com/techengineerworkstation/YouLikeHits-Bot.git
 cd YouLikeHits-Bot
 ./run.sh`}</code>
             </pre>
@@ -128,7 +120,7 @@ cd YouLikeHits-Bot
             </h3>
             <p className="text-sm text-gray-400">
               Click &quot;Setup Browser&quot; in the GUI. Log in to YouLikeHits
-              in the Chrome window that opens. Close it when done.
+              in the Chrome window that opens, and keep that window open.
             </p>
           </div>
           <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6">
@@ -136,8 +128,9 @@ cd YouLikeHits-Bot
               3. Start earning
             </h3>
             <p className="text-sm text-gray-400">
-              Toggle any loop: Website Views, YouTube, SoundCloud, Daily Bonus,
-              or run the Master Loop to do everything automatically.
+              Start one loop: Website Views, YouTube, SoundCloud, Daily Bonus,
+              or the Master Loop to cycle through all of them. Stop responds
+              within a second.
             </p>
           </div>
           <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6">
