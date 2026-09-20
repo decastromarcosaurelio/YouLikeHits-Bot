@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 from bot_logic import utils
-from tests.fakes import FakeDriver, FakeElement
+from tests.fakes import FakeDriver, FakeElement, logged_in
 
 
 class ChromeVersionTests(unittest.TestCase):
@@ -57,19 +57,25 @@ class WaitTests(unittest.TestCase):
 
 
 class PageHelperTests(unittest.TestCase):
-    def test_logged_in_requires_points_element(self):
+    def test_logged_in_requires_logout_link(self):
         self.assertFalse(utils.is_logged_in(FakeDriver(body="Welcome")))
-        self.assertTrue(utils.is_logged_in(FakeDriver(
-            body="Welcome", elements={".points": [FakeElement("120")]})))
+        self.assertTrue(utils.is_logged_in(FakeDriver(elements=logged_in())))
 
-    def test_not_logged_in_text_wins(self):
-        d = FakeDriver(body="You are NOT logged in", elements={".points": [FakeElement("0")]})
-        self.assertFalse(utils.is_logged_in(d))
-
-    def test_get_points_from_element_and_body(self):
-        self.assertEqual(utils.get_points(FakeDriver(elements={"#points": [FakeElement("1,234")]})), 1)
+    def test_get_points_from_span_and_body(self):
+        self.assertEqual(utils.get_points(FakeDriver(elements=logged_in("1,234"))), 1234)
         self.assertEqual(utils.get_points(FakeDriver(body="You have 1,234 Points")), 1234)
         self.assertIsNone(utils.get_points(FakeDriver(body="nothing")))
+
+    def test_seconds_from_text(self):
+        self.assertEqual(utils.seconds_from_text("then wait 20 seconds. Keep", 5), 20)
+        self.assertEqual(utils.seconds_from_text("Watching 0 / 124 s", 5), 124)
+        self.assertEqual(utils.seconds_from_text("", 5), 5)
+
+    def test_wait_until_returns_value_or_none(self):
+        with mock.patch.object(utils.time, "sleep", lambda s: None):
+            hits = iter([None, None, "ok"])
+            self.assertEqual(utils.wait_until(lambda: next(hits), timeout=10), "ok")
+            self.assertIsNone(utils.wait_until(lambda: None, timeout=0))
 
     def test_browser_alive(self):
         d = FakeDriver()

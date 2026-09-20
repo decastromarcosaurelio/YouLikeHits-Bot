@@ -16,6 +16,11 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 YLH_BASE = "https://www.youlikehits.com"
 
+# Selectors verified against the live site on 2026-09-20.
+LOGOUT_LINK = "#logoutlink"            # present only when logged in
+LOGGED_OUT_MARKER = "#ylhloggedout"    # injected into AJAX replies when the session died
+POINTS_SPAN = "#currentpoints"         # live points balance (updated by the site's JS)
+
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PROFILE_DIR = os.path.join(PROJECT_DIR, "chrome_profile")
 
@@ -102,6 +107,52 @@ def wait_unless_stopped(seconds, is_stopped=None, step=1.0):
         time.sleep(min(step, remaining))
 
 
+def wait_until(predicate, timeout, is_stopped=None, step=1.0):
+    """Poll `predicate()` until it is truthy, the timeout passes, or we are stopped.
+
+    Returns the truthy value, or None on timeout/stop.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            value = predicate()
+        except Exception:
+            value = None
+        if value:
+            return value
+        if is_stopped and is_stopped():
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(step, remaining))
+
+
+def close_extra_windows(driver, keep):
+    """Close every window except `keep` and switch back to it."""
+    try:
+        for handle in list(driver.window_handles):
+            if handle != keep:
+                driver.switch_to.window(handle)
+                driver.close()
+        driver.switch_to.window(keep)
+    except Exception:
+        try:
+            driver.switch_to.window(driver.window_handles[0])
+        except Exception:
+            pass
+
+
+def seconds_from_text(text, default):
+    """Pull the first integer out of 'wait 20 seconds' / 'Watching 0 / 124 s'; else default."""
+    if not text:
+        return default
+    nums = re.findall(r"/\s*(\d+)\s*s|(\d+)\s*seconds?", text)
+    for a, b in nums:
+        return int(a or b)
+    return default
+
+
 def random_delay(min_sec=2, max_sec=5, is_stopped=None):
     """Wait a random duration between actions (interruptible)."""
     delay = random.uniform(min_sec, max_sec)
@@ -151,32 +202,26 @@ def is_browser_alive(driver):
 
 
 def is_logged_in(driver):
-    """Check if user is logged in by looking for dashboard indicators.
-
-    NOTE: selectors are unverified against the live site; adjust if YLH changes.
-    """
+    """True when the page shows the Logout link (only rendered for a live session)."""
     try:
-        if "not logged in" in body_text(driver):
+        if driver.find_elements(By.CSS_SELECTOR, LOGGED_OUT_MARKER):
             return False
-        driver.find_element(By.CSS_SELECTOR, ".points, #points, [class*='point']")
-        return True
-    except NoSuchElementException:
-        return False
+        return bool(driver.find_elements(By.CSS_SELECTOR, LOGOUT_LINK))
     except Exception:
         return False
 
 
 def get_points(driver):
-    """Attempt to read current points balance. Returns int or None."""
+    """Read the live points balance from the header. Returns int or None."""
     try:
-        for sel in (".points", "#points", "[class*='point']", ".pointsdisplay"):
-            try:
-                text = driver.find_element(By.CSS_SELECTOR, sel).text.strip()
-            except NoSuchElementException:
-                continue
-            nums = re.findall(r"\d+", text)
-            if nums:
-                return int(nums[0])
+        text = driver.find_element(By.CSS_SELECTOR, POINTS_SPAN).text
+        digits = re.sub(r"[^0-9]", "", text)
+        return int(digits) if digits else None
+    except NoSuchElementException:
+        pass
+    except Exception:
+        return None
+    try:
         match = re.search(r"(\d[\d,]*)\s*[Pp]oints?", driver.find_element(By.TAG_NAME, "body").text)
         if match:
             return int(match.group(1).replace(",", ""))

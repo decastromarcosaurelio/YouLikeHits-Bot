@@ -12,7 +12,7 @@ Bot em Python que automatiza tarefas de troca no YouLikeHits.com via Selenium co
 
 ## Onde ficam as coisas
 
-- Loops do bot: um módulo por tarefa em `bot_logic/`; fábrica do navegador em `bot_logic/utils.py`; GUI em `gui/app.py`; menu CLI em `main_cli.py`.
+- Loops do bot: um módulo por tarefa em `bot_logic/`; fluxo comum YouTube/SoundCloud em `bot_logic/earn.py`; fábrica do navegador em `bot_logic/utils.py`; GUI em `gui/app.py`; menu CLI em `main_cli.py`.
 - Landing: `landing/`, com `package.json` próprio; rode os comandos npm de dentro dela, a raiz não tem `package.json`.
 
 ## Rodar e verificar
@@ -30,7 +30,10 @@ Bot em Python que automatiza tarefas de troca no YouLikeHits.com via Selenium co
 - O major do Chrome é detectado em tempo de execução (`utils.detect_chrome_major` lê `chrome --version`) e passado como `version_main` ao uc. Não fixe número em código.
 - Esperas longas usam `utils.wait_unless_stopped(segundos, is_stopped)`, nunca `time.sleep` direto, para que o Stop da GUI responda em ~1 s.
 - GUI: um loop por vez (`self.running_loop`). Toda atualização de widget a partir de thread passa por `self._ui(...)` (`root.after`). O navegador fica aberto durante o login; `_watch_browser` desabilita os loops se o usuário fechá-lo.
-- Seletores CSS do site (`.followbutton`, `.buybutton`, `[class*='point']`, textos "you have made", "no websites currently") não foram validados contra o YouLikeHits ao vivo nesta base; ao mexer neles, teste com sessão real. `:contains()` não é CSS válido no Selenium; um teste guarda isso.
+- Seletores do site foram verificados ao vivo em 2026-09-20 e estão como constantes no topo de cada módulo: login = `#logoutlink` presente (`#ylhloggedout` = sessão morta), pontos = `#currentpoints`, sites = `#wh-visit`/`.wh-result`, YouTube e SoundCloud = `#listall a.earn-btn` com `onclick="imageWin(id,'key','segundos',...)"` e resultado em `#showresult`, bônus = "N / M hits" + `.bonus-pill`. Se o site mudar, o sintoma é "Not logged in" ou "No ... available" com a página visivelmente cheia; salve o HTML e ajuste as constantes.
+- O site só credita pontos se o clique for confiável (`event.isTrusted`), e o timer roda no JavaScript da própria página. Clique sempre com `element.click()` do Selenium, nunca via `execute_script`, e espere o resultado (`.wh-result` / `#showresult`) em vez de dormir um tempo fixo. `bot_logic/earn.py` encapsula isso para YouTube e SoundCloud.
+- O estado "bônus disponível para resgate" ainda não foi observado ao vivo; `bonus.CLAIM_CANDIDATES` é propositalmente amplo. Ao ver esse estado, salve o HTML e estreite o seletor.
+- `:contains()` não é CSS válido no Selenium; um teste guarda isso.
 
 ## Armadilhas conhecidas
 

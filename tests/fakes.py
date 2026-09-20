@@ -3,14 +3,18 @@ from selenium.common.exceptions import NoSuchElementException
 
 
 class FakeElement:
-    def __init__(self, text="", displayed=True, on_click=None):
+    def __init__(self, text="", displayed=True, on_click=None, attrs=None):
         self.text = text
         self._displayed = displayed
         self._on_click = on_click
+        self.attrs = attrs or {}
         self.clicks = 0
 
     def is_displayed(self):
         return self._displayed
+
+    def get_attribute(self, name):
+        return self.attrs.get(name)
 
     def click(self):
         self.clicks += 1
@@ -19,7 +23,11 @@ class FakeElement:
 
 
 class FakeDriver:
-    """A page is a dict: selector -> list[FakeElement]. 'body' is the body text."""
+    """A page is a dict: selector -> list[FakeElement]. 'body' is the body text.
+
+    Selectors are matched literally; comma lists are split and each part
+    looked up on its own.
+    """
 
     def __init__(self, body="", elements=None, alive=True):
         self.body = body
@@ -68,3 +76,8 @@ class FakeDriver:
         if name == "window_handles" and not object.__getattribute__(self, "alive"):
             raise RuntimeError("invalid session id")
         return object.__getattribute__(self, name)
+
+
+def logged_in(points="45"):
+    """Elements the live site renders only for a logged-in session."""
+    return {"#logoutlink": [FakeElement("Logout")], "#currentpoints": [FakeElement(points)]}

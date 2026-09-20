@@ -1,79 +1,87 @@
 """Website views automation.
 
-One page-processing function, three callers (GUI loop, CLI loop, master).
+Live site flow (verified 2026-09-20): the page shows ONE site at a time in
+`#wh-flow`. Clicking `#wh-visit` opens the site in a new tab and starts a
+JS timer on the YLH page (`#wh-elapsed / N s`). When the timer ends the page
+itself calls the points endpoint, shows `.wh-result`, and loads the next site
+after ~2 s. `#wh-skip` skips. Empty state: "There are no websites to visit".
 """
-import random
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import WebDriverException
 from .utils import (
     is_logged_in, navigate_to, check_service_unavailable, random_delay,
-    get_points, body_text, wait_unless_stopped, run_cli_task,
+    get_points, body_text, wait_unless_stopped, wait_until, close_extra_windows,
+    seconds_from_text, run_cli_task,
 )
 
 PAGE = "websites.php"
-BUTTON_SELECTOR = ".followbutton, .viewbutton, a[onclick*='view'], button[onclick*='view']"
-NO_ITEMS_MARKERS = ("no websites currently", "no websites visitable")
+VISIT_SELECTOR = "#wh-visit"
+SKIP_SELECTOR = "#wh-skip"
+STATUS_SELECTOR = ".wh-status"
+RESULT_SELECTOR = ".wh-result"
+NO_ITEMS_MARKERS = ("no websites to visit", "no websites currently", "no websites visitable")
+DEFAULT_SECONDS = 20
+MAX_EXTRA_WAIT = 25   # slack on top of the site's own timer
 
 
-def _close_extra_windows(driver, keep):
-    """Close every window except `keep` and switch back to it."""
-    try:
-        for handle in driver.window_handles:
-            if handle != keep:
-                driver.switch_to.window(handle)
-                driver.close()
-        driver.switch_to.window(keep)
-    except Exception:
-        try:
-            driver.switch_to.window(driver.window_handles[0])
-        except Exception:
-            pass
+def _find(driver, selector):
+    els = driver.find_elements(By.CSS_SELECTOR, selector)
+    return els[0] if els else None
 
 
 def process_websites_once(driver, log, is_stopped, limit=None):
-    """Do one pass over the websites page.
+    """View sites until the page runs dry, `limit` is reached, or we are stopped.
 
-    Returns the number of websites viewed. 0 with nothing found means the
-    caller should back off before trying again.
+    Returns the number of sites credited.
     """
     if check_service_unavailable(driver):
         navigate_to(driver, PAGE)
 
-    text = body_text(driver)
-    if any(marker in text for marker in NO_ITEMS_MARKERS):
-        return 0
-
-    buttons = driver.find_elements(By.CSS_SELECTOR, BUTTON_SELECTOR)
-    if limit:
-        buttons = buttons[:limit]
-    if not buttons:
-        return 0
-
-    log(f"Found {len(buttons)} websites to view.")
     viewed = 0
-    for i, button in enumerate(buttons, 1):
-        if is_stopped():
+    while not is_stopped() and (limit is None or viewed < limit):
+        if any(m in body_text(driver) for m in NO_ITEMS_MARKERS):
             break
-        original_window = driver.current_window_handle
-        try:
-            if not button.is_displayed():
-                continue
-            log(f"Viewing website {i}/{len(buttons)}...")
-            button.click()
-            wait_unless_stopped(1, is_stopped)
 
-            new_windows = [w for w in driver.window_handles if w != original_window]
-            if new_windows:
-                driver.switch_to.window(new_windows[0])
-                log("Waiting for website timer...")
-                wait_unless_stopped(random.uniform(12, 35), is_stopped)
-                _close_extra_windows(driver, keep=original_window)
-                log("Website viewed.")
+        visit = wait_until(lambda: _find(driver, VISIT_SELECTOR), timeout=8, is_stopped=is_stopped)
+        if not visit:
+            break
+
+        status = _find(driver, STATUS_SELECTOR)
+        seconds = seconds_from_text(status.text if status else "", DEFAULT_SECONDS)
+        name = body_text(driver).split("\n")[0][:40]
+        main_window = driver.current_window_handle
+        try:
+            log(f"Viewing website ({seconds}s timer)...")
+            visit.click()
+
+            # The site's JS credits points and swaps the card for `.wh-result`.
+            result = wait_until(
+                lambda: _find(driver, RESULT_SELECTOR),
+                timeout=seconds + MAX_EXTRA_WAIT, is_stopped=is_stopped, step=1.0,
+            )
+            close_extra_windows(driver, keep=main_window)
+            if result is None:
+                if is_stopped():
+                    break
+                log("Timer did not complete; skipping this site.")
+                skip = _find(driver, SKIP_SELECTOR)
+                if skip:
+                    skip.click()
+                continue
+
+            text = result.text.strip()
+            if "earned" in text.lower():
                 viewed += 1
-            random_delay(2, 5, is_stopped)
+                log(f"Website viewed: {text}")
+            else:
+                log(f"Site not credited: {text or 'unknown result'}")
+            # page loads the next card by itself (~2 s)
+            wait_unless_stopped(3, is_stopped)
+            random_delay(1, 3, is_stopped)
         except WebDriverException as e:
             log(f"Error viewing website: {e.__class__.__name__}")
-            _close_extra_windows(driver, keep=original_window)
+            close_extra_windows(driver, keep=main_window)
+            navigate_to(driver, PAGE)
     return viewed
 
 
@@ -89,10 +97,11 @@ def _run_website_task(driver, is_stopped, log_func, update_points_func):
     while not is_stopped():
         update_points_func(get_points(driver))
         viewed = process_websites_once(driver, log_func, is_stopped)
+        update_points_func(get_points(driver))
         if is_stopped():
             break
         if viewed:
-            log_func("All websites viewed. Refreshing for more...")
+            log_func(f"{viewed} website(s) viewed. Checking for more...")
             wait_unless_stopped(5, is_stopped)
         else:
             log_func("No websites available. Waiting 2 minutes...")

@@ -1,21 +1,45 @@
 """Daily bonus claimer.
 
-One page-processing function, three callers (GUI loop, CLI loop, master).
+Live site (verified 2026-09-20): `bonuspoints.php` shows "N / M hits" and a
+milestone list (10, 25, 50, 100 hits). `.bonus-pill` reads "No bonus to claim
+yet" while nothing is claimable. When a milestone is reached the site shows a
+claim control (a link/button whose text contains "claim"); the exact markup
+of that state has not been observed yet, so the selector is deliberately broad.
 """
+import re
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import WebDriverException, NoSuchElementException
+from selenium.common.exceptions import WebDriverException
 from .utils import (
     is_logged_in, navigate_to, check_service_unavailable, random_delay,
     get_points, body_text, wait_unless_stopped, run_cli_task,
 )
 
 PAGE = "bonuspoints.php"
-CLAIM_SELECTOR = ".buybutton, button[onclick*='buy'], a[onclick*='buy']"
+PILL_SELECTOR = ".bonus-pill"
+CLAIM_CANDIDATES = ".bonus-row a, .bonus-row button, .bonus-pill a, .bonus-pill button, a[href*='claim'], button[onclick*='claim'], .buybutton"
+HITS_RE = re.compile(r"(\d+)\s*/\s*(\d+)\s*hits", re.I)
 
 # Page states returned by process_bonus_once
 CLAIMED = "claimed"
 ALREADY_DONE = "already_done"
 NOT_AVAILABLE = "not_available"
+
+
+def hits_progress(text):
+    """Return (hits, next_milestone) from 'N / M hits', or (None, None)."""
+    m = HITS_RE.search(text or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+
+
+def _claim_control(driver):
+    for el in driver.find_elements(By.CSS_SELECTOR, CLAIM_CANDIDATES):
+        try:
+            text = (el.text or "").strip().lower()
+            if "claim" in text and "no bonus" not in text and el.is_displayed():
+                return el
+        except WebDriverException:
+            continue
+    return None
 
 
 def process_bonus_once(driver, log, is_stopped):
@@ -24,22 +48,24 @@ def process_bonus_once(driver, log, is_stopped):
         navigate_to(driver, PAGE)
 
     text = body_text(driver)
-    if "you have made" in text and "hits out of" in text:
-        return ALREADY_DONE
+    hits, goal = hits_progress(text)
+    if hits is not None:
+        log(f"Daily hits: {hits}/{goal}.")
 
     try:
-        claim_btn = driver.find_element(By.CSS_SELECTOR, CLAIM_SELECTOR)
-        if claim_btn.is_displayed():
-            log("Claim button found! Clicking...")
-            claim_btn.click()
+        control = _claim_control(driver)
+        if control:
+            log("Bonus available! Claiming...")
+            control.click()
             wait_unless_stopped(3, is_stopped)
             log("Daily bonus claimed!")
             random_delay(2, 5, is_stopped)
             return CLAIMED
-    except NoSuchElementException:
-        pass
     except WebDriverException as e:
         log(f"Error claiming bonus: {e.__class__.__name__}")
+
+    if "no bonus to claim" in text or (hits is not None and goal and hits < goal):
+        return ALREADY_DONE
     return NOT_AVAILABLE
 
 
@@ -58,10 +84,10 @@ def _run_bonus_task(driver, is_stopped, log_func, update_points_func):
         if is_stopped():
             break
         if state == ALREADY_DONE:
-            log_func("Daily bonus already claimed or not enough hits yet. Waiting 5 minutes...")
+            log_func("No bonus to claim yet (earn more hits). Checking again in 5 minutes...")
             wait_unless_stopped(300, is_stopped)
         elif state == NOT_AVAILABLE:
-            log_func("No claim button available. Waiting 2 minutes...")
+            log_func("No claim control found. Checking again in 2 minutes...")
             wait_unless_stopped(120, is_stopped)
         navigate_to(driver, PAGE)
 

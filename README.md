@@ -10,10 +10,10 @@ Free, open-source Python bot that automates exchange tasks on [YouLikeHits.com](
 
 | Task           | Page on YouLikeHits    | Behaviour                                                        |
 |----------------|------------------------|------------------------------------------------------------------|
-| Website Views  | `websites.php`         | Opens each site in a new tab, waits out the timer, closes it     |
-| YouTube Views  | `youtubenew2.php`      | Clicks each video, waits ~90-135 s, clicks Submit                |
-| SoundCloud Plays | `soundcloudplays.php` | Clicks each track, waits ~30-60 s                                |
-| Daily Bonus    | `bonuspoints.php`      | Claims the bonus when the button is there, re-checks periodically |
+| Website Views  | `websites.php`         | Clicks "Visit site", waits for the page's own timer (~20 s), closes the tab |
+| YouTube Views  | `youtubenew2.php`      | Clicks "View", waits for the page's timer (2-3 min), reads the result |
+| SoundCloud Plays | `soundcloudplays.php` | Clicks "Listen", waits for the page's timer (~1 min), reads the result |
+| Daily Bonus    | `bonuspoints.php`      | Reports today's hits toward the next milestone; claims when one is reachable |
 | Master Loop    | all of the above       | Bonus, then 3 sites, 2 videos, 2 tracks; waits 1-3 min; repeats   |
 
 - **GUI + CLI** — customtkinter window or a terminal menu. Both run the exact same task code.
@@ -21,6 +21,7 @@ Free, open-source Python bot that automates exchange tasks on [YouLikeHits.com](
 - **Captchas are not solved automatically.** When one appears the bot pauses 30 s and asks you to solve it in the browser.
 - **Login is manual** — you log in once in the Chrome window the bot opens; the session is kept in `chrome_profile/`.
 - **Chrome version is detected** from the installed binary, so a Chrome update never breaks the driver pin.
+- **Selectors verified against the live site** (September 2026). The bot waits for the site's own result message instead of sleeping a fixed time, so it credits exactly what the site credits.
 
 ## Quick Start
 
@@ -78,6 +79,7 @@ YouLikeHits-Bot/
 ├── gui/app.py           # customtkinter GUI (one loop at a time, thread-safe updates)
 ├── bot_logic/
 │   ├── utils.py         # Browser factory, Chrome version detection, waits, login/points helpers
+│   ├── earn.py          # Shared View/Listen flow for YouTube and SoundCloud
 │   ├── websites.py      # process_websites_once + loop
 │   ├── youtube.py       # process_youtube_once + loop
 │   ├── soundcloud.py    # process_soundcloud_once + loop
