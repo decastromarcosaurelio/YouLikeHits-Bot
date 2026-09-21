@@ -31,6 +31,9 @@ class ChromeVersionTests(unittest.TestCase):
              mock.patch.object(utils.uc, "Chrome") as chrome:
             utils.setup_browser("/tmp/profile")
         self.assertEqual(chrome.call_args.kwargs["version_main"], 153)
+        # Chrome's popup blocker stays ON: the site's own popups come from a
+        # trusted click; the flag only let advertisers flood the browser.
+        self.assertNotIn("--disable-popup-blocking", chrome.call_args.kwargs["options"].arguments)
 
 
 class WaitTests(unittest.TestCase):
@@ -80,9 +83,98 @@ class PageHelperTests(unittest.TestCase):
     def test_browser_alive(self):
         d = FakeDriver()
         self.assertTrue(utils.is_browser_alive(d))
+        self.assertEqual(utils.browser_state(d), "alive")
         d.quit()
         self.assertFalse(utils.is_browser_alive(d))
+        self.assertEqual(utils.browser_state(d), "closed")
         self.assertFalse(utils.is_browser_alive(None))
+
+    def test_slow_browser_is_unresponsive_not_closed(self):
+        """A timeout enumerating 1,000 tabs is not the user closing the browser."""
+        class Slow(FakeDriver):
+            def __getattribute__(self, name):
+                if name == "window_handles":
+                    raise TimeoutError("Read timed out. (read timeout=120)")
+                return object.__getattribute__(self, name)
+        d = Slow()
+        self.assertEqual(utils.browser_state(d), "unresponsive")
+        self.assertTrue(utils.is_browser_alive(d))
+
+    def test_tab_level_errors_are_unresponsive(self):
+        for msg in ("disconnected: not connected to DevTools",
+                    "target window already closed",
+                    "no such window: window was already closed"):
+            class Tab(FakeDriver):
+                def __getattribute__(self, name):
+                    if name == "window_handles":
+                        raise RuntimeError(msg)
+                    return object.__getattribute__(self, name)
+            self.assertEqual(utils.browser_state(Tab()), "unresponsive", msg)
+        class Dead(FakeDriver):
+            def __getattribute__(self, name):
+                if name == "window_handles":
+                    raise RuntimeError("invalid session id")
+                return object.__getattribute__(self, name)
+        self.assertEqual(utils.browser_state(Dead()), "closed")
+
+    def test_dead_driver_process_is_closed(self):
+        class Gone(FakeDriver):
+            class service:
+                class process:
+                    @staticmethod
+                    def poll(): return 0
+            def __getattribute__(self, name):
+                if name == "window_handles":
+                    raise TimeoutError("Read timed out.")
+                return object.__getattribute__(self, name)
+        self.assertEqual(utils.browser_state(Gone()), "closed")
+
+    def test_close_extra_windows_keeps_set_and_survives_vanishing(self):
+        d = FakeDriver()
+        d.window_handles += ["popup", "ad1", "ad2"]
+        orig_close = d.close
+        def flaky_close():
+            if d.current_window_handle == "ad1":
+                d.window_handles.remove("ad1"); raise RuntimeError("no such window")
+            orig_close()
+        d.close = flaky_close
+        utils.close_extra_windows(d, keep={"main", "popup"})
+        self.assertEqual(sorted(d.window_handles), ["main", "popup"])
+        self.assertEqual(d.current_window_handle, "main")
+
+    def test_window_guard_keeps_late_popup_and_prunes_ads(self):
+        d = FakeDriver()
+        guard = utils.WindowGuard(d, "main")          # snapshot before the click
+        self.assertFalse(guard.prune())               # nothing new yet: nothing pruned
+        d.window_handles.append("popup")              # the page opens its popup late
+        self.assertFalse(guard.prune())
+        self.assertEqual(guard.popup, "popup")
+        d.window_handles += ["ad1", "ad2"]
+        self.assertTrue(guard.prune())
+        self.assertEqual(sorted(d.window_handles), ["main", "popup"])
+
+    def test_window_guard_snapshot_failure_falls_back_to_main(self):
+        class Flaky(FakeDriver):
+            fail_once = True
+            def __getattribute__(self, name):
+                if name == "window_handles" and object.__getattribute__(self, "fail_once"):
+                    object.__setattr__(self, "fail_once", False)
+                    raise TimeoutError("Read timed out.")
+                return object.__getattribute__(self, name)
+        d = Flaky()
+        guard = utils.WindowGuard(d, "main")
+        self.assertEqual(guard.before, {"main"})
+        d.window_handles.append("popup"); guard.prune()
+        d.window_handles.append("ad"); self.assertTrue(guard.prune())
+        self.assertEqual(sorted(d.window_handles), ["main", "popup"])
+
+    def test_window_guard_ignores_stale_window(self):
+        d = FakeDriver(); d.window_handles.append("stale")
+        guard = utils.WindowGuard(d, "main")
+        d.window_handles.append("popup")
+        guard.prune()
+        self.assertEqual(guard.popup, "popup")
+        self.assertEqual(sorted(d.window_handles), ["main", "popup"])
 
 
 if __name__ == "__main__":

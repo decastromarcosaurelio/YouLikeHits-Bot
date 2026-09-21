@@ -15,7 +15,7 @@ import os
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bot_logic.utils import setup_browser, is_browser_alive, YLH_BASE
+from bot_logic.utils import setup_browser, browser_state, YLH_BASE
 from bot_logic import settings as settings_mod
 
 LOOPS = [
@@ -38,6 +38,7 @@ STATUS_READY = ("Ready", "#00ff88")
 STATUS_RUNNING = ("Running", "#00d4ff")
 STATUS_ERROR = ("Browser Error", "#ff4444")
 STATUS_CLOSED = ("Browser Closed", "#ff4444")
+STATUS_UNRESPONSIVE = ("Browser Not Responding", "#ffaa00")
 
 
 def _task_for(name):
@@ -69,6 +70,7 @@ class BotGUI:
         self.settings = settings_mod.load()
         self.driver = None
         self.running_loop = None      # name of the single active loop, or None
+        self.browser_state = "closed"  # last state seen by _watch_browser
         self._stop_flag = False
         self.loop_buttons = {}
 
@@ -245,6 +247,7 @@ class BotGUI:
                 self._ui(lambda: self.setup_btn.configure(state="normal"))
                 return
             self.driver = driver
+            self.browser_state = "alive"
             try:
                 driver.get(f"{YLH_BASE}/login.php")
             except Exception as e:
@@ -258,9 +261,26 @@ class BotGUI:
         threading.Thread(target=_run, daemon=True).start()
 
     def _watch_browser(self, driver):
-        """Block (in the worker thread) until the browser is closed, then lock the UI."""
-        while is_browser_alive(driver):
+        """Block (in the worker thread) until the browser is closed, then lock the UI.
+
+        A driver call that merely fails (timeout, crashed tab, a flood of
+        pop-under tabs) is reported as "not responding" and watched further;
+        only a definite dead session locks the UI.
+        """
+        while True:
+            state = browser_state(driver)
+            if state == "closed":
+                break
+            if state == "unresponsive" and self.browser_state != "unresponsive":
+                self.browser_state = state
+                self._log("Browser is not responding (still open). Waiting for it...")
+                self._set_status(STATUS_UNRESPONSIVE)
+            elif state == "alive" and self.browser_state == "unresponsive":
+                self.browser_state = state
+                self._log("Browser is responding again.")
+                self._set_status(STATUS_RUNNING if self.running_loop else STATUS_READY)
             time.sleep(2)
+        self.browser_state = "closed"
         if self.driver is driver:
             self.driver = None
             self._stop_flag = True
@@ -283,8 +303,14 @@ class BotGUI:
         if self.running_loop:
             self._log(f"'{self.running_loop}' is still running. Stop it first.")
             return
-        if not is_browser_alive(self.driver):
+        # Never call the driver on the Tk thread: with hundreds of tabs open a
+        # window_handles call can block for the whole HTTP timeout. The watcher
+        # thread keeps self.browser_state current.
+        if self.driver is None or self.browser_state == "closed":
             self._log("Browser is not open. Click 'Setup Browser' first.")
+            return
+        if self.browser_state == "unresponsive":
+            self._log("Browser is not responding. Wait for it to recover first.")
             return
 
         if name == "master" and not self._apply_wait_settings():
@@ -338,9 +364,14 @@ class BotGUI:
         if self.running_loop == name:
             self.running_loop = None
         self._reset_button_label(name)
-        alive = is_browser_alive(self.driver)
+        alive = self.driver is not None and self.browser_state != "closed"
         self._set_loop_buttons(alive)
-        self._set_status_now(STATUS_READY if alive else STATUS_CLOSED)
+        if not alive:
+            self._set_status_now(STATUS_CLOSED)
+        elif self.browser_state == "unresponsive":
+            self._set_status_now(STATUS_UNRESPONSIVE)
+        else:
+            self._set_status_now(STATUS_READY)
 
     # ── Lifecycle ─────────────────────────────────────────────────────
     def _on_close(self):

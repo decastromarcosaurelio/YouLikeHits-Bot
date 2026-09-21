@@ -11,6 +11,7 @@ from selenium.common.exceptions import WebDriverException
 from .utils import (
     is_logged_in, navigate_to, check_service_unavailable, random_delay,
     get_points, body_text, wait_unless_stopped, wait_until, close_extra_windows,
+    WindowGuard,
     seconds_from_text, run_cli_task,
 )
 
@@ -52,13 +53,19 @@ def process_websites_once(driver, log, is_stopped, limit=None):
         main_window = driver.current_window_handle
         try:
             log(f"Viewing website ({seconds}s timer)...")
+            close_extra_windows(driver, keep=main_window)   # snapshot must be just the YLH tab
+            guard = WindowGuard(driver, main_window)
             visit.click()
 
             # The site's JS credits points and swaps the card for `.wh-result`.
-            result = wait_until(
-                lambda: _find(driver, RESULT_SELECTOR),
-                timeout=seconds + MAX_EXTRA_WAIT, is_stopped=is_stopped, step=1.0,
-            )
+            # The visited site may spawn pop-unders the whole time the timer
+            # runs, so they are pruned on every poll, not only afterwards.
+            def _poll():
+                guard.prune()
+                driver.switch_to.window(main_window)
+                return _find(driver, RESULT_SELECTOR)
+            result = wait_until(_poll, timeout=seconds + MAX_EXTRA_WAIT,
+                                is_stopped=is_stopped, step=1.0)
             close_extra_windows(driver, keep=main_window)
             if result is None:
                 if is_stopped():

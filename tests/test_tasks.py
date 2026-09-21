@@ -89,6 +89,58 @@ class WebsitesTests(unittest.TestCase):
         with _no_sleep():
             self.assertEqual(websites.process_websites_once(d, lambda m: None, lambda: False), 0)
 
+    def test_popunder_flood_is_pruned_during_timer(self):
+        """A visited site spawning pop-unders while the timer runs must not
+        accumulate tabs (live 2026-09-20: 1,100 tabs, GUI declared browser closed)."""
+        d = self._page()
+        d.elements["#wh-visit"][0]._on_click = lambda: d.window_handles.append("popup")
+        polls = {"n": 0}
+        real_find = d.find_elements
+
+        def spawning_find(by, value):
+            if value == ".wh-result":
+                polls["n"] += 1
+                d.window_handles.extend(f"ad{polls['n']}-{i}" for i in range(20))
+                if polls["n"] == 4:
+                    d.elements[".wh-result"] = [FakeElement("You earned 7 points!")]
+                    d.elements.pop("#wh-visit")
+            return real_find(by, value)
+        d.find_elements = spawning_find
+        peak = {"tabs": 0}
+        orig_switch = d.window
+        def counting_switch(h):
+            peak["tabs"] = max(peak["tabs"], len(d.window_handles)); orig_switch(h)
+        d.window = counting_switch
+        with _no_sleep():
+            viewed = websites.process_websites_once(d, lambda m: None, lambda: False, limit=1)
+        self.assertEqual(viewed, 1)
+        self.assertEqual(d.window_handles, ["main"])
+        self.assertEqual(d.current_window_handle, "main")
+        self.assertLess(peak["tabs"], 45)     # pruned every poll, never piles up
+
+    def test_late_popup_is_not_pruned(self):
+        """The site may open its window a beat after the click; it must survive."""
+        d = self._page()
+        d.elements["#wh-visit"][0]._on_click = None
+        polls = {"n": 0}; real_find = d.find_elements
+        closed = []
+        orig_close = d.close
+        def find(by, value):
+            if value == ".wh-result":
+                polls["n"] += 1
+                if polls["n"] == 2: d.window_handles.append("popup")     # late popup
+                if polls["n"] == 3: d.window_handles.append("ad")
+                if polls["n"] == 4:
+                    d.elements[".wh-result"] = [FakeElement("You earned 7 points!")]
+                    d.elements.pop("#wh-visit")
+            return real_find(by, value)
+        d.find_elements = find
+        d.close = lambda: (closed.append(d.current_window_handle), orig_close())
+        with _no_sleep():
+            self.assertEqual(websites.process_websites_once(d, lambda m: None, lambda: False, limit=1), 1)
+        self.assertEqual(closed[0], "ad")            # the ad went first, not the popup
+        self.assertEqual(d.window_handles, ["main"])
+
     def test_timeout_skips(self):
         d = self._page()
         d.elements["#wh-visit"][0]._on_click = None       # timer never completes
@@ -115,6 +167,27 @@ class EarnCardTests(unittest.TestCase):
             d.elements.pop("#listall a.earn-btn")
         d.elements["#listall a.earn-btn"] = [FakeElement("View", on_click=on_click, attrs={"onclick": onclick})]
         return d
+
+    def test_popunder_flood_is_pruned_during_timer(self):
+        d = self._page("imageWin(1,'abc','124','x',0,event);")
+        d.elements["#listall a.earn-btn"][0]._on_click = lambda: d.window_handles.append("popup")
+        polls = {"n": 0}; real_find = d.find_elements
+        def find(by, value):
+            if value == "#showresult":
+                polls["n"] += 1
+                d.window_handles.extend(f"ad{polls['n']}-{i}" for i in range(20))
+                if polls["n"] == 4:
+                    d.elements["#showresult"] = [FakeElement("You earned 7 points!")]
+                    d.elements.pop("#listall a.earn-btn")
+            return real_find(by, value)
+        d.find_elements = find
+        peak = {"tabs": 0}; orig = d.window
+        def sw(h): peak["tabs"] = max(peak["tabs"], len(d.window_handles)); orig(h)
+        d.window = sw
+        with _no_sleep():
+            self.assertEqual(youtube.process_youtube_once(d, lambda m: None, lambda: False, limit=1), 1)
+        self.assertEqual(d.window_handles, ["main"])
+        self.assertLess(peak["tabs"], 45)
 
     def test_youtube_credits(self):
         d = self._page("imageWin(1,'abc','124','x',0,event);")

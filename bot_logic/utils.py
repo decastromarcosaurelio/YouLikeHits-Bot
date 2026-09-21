@@ -79,7 +79,10 @@ def setup_browser(profile_dir=None):
 
     options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile_dir}")
-    options.add_argument("--disable-popup-blocking")
+    # Keep Chrome's popup blocker ON. The site's own popups (`#wh-visit`,
+    # `imageWin`) come from a trusted click and are allowed anyway; the flag
+    # only served the advertisers' pop-unders (seen live 2026-09-20: one
+    # visited site spawned 1,100+ tabs and 7 GB of RAM in ten minutes).
     try:
         return uc.Chrome(options=options, version_main=major)
     except Exception as e:
@@ -129,18 +132,77 @@ def wait_until(predicate, timeout, is_stopped=None, step=1.0):
 
 
 def close_extra_windows(driver, keep):
-    """Close every window except `keep` and switch back to it."""
+    """Close every window not in `keep` (a handle or a set of handles).
+
+    Switches back to the first handle of `keep` that still exists. Each close
+    is attempted on its own, so a window that vanished mid-loop (pop-unders
+    close and reopen themselves) does not abort the sweep.
+    """
+    keep = {keep} if isinstance(keep, str) else set(keep)
     try:
-        for handle in list(driver.window_handles):
-            if handle != keep:
-                driver.switch_to.window(handle)
-                driver.close()
-        driver.switch_to.window(keep)
+        handles = list(driver.window_handles)
     except Exception:
+        return
+    for handle in handles:
+        if handle in keep:
+            continue
         try:
-            driver.switch_to.window(driver.window_handles[0])
+            driver.switch_to.window(handle)
+            driver.close()
         except Exception:
             pass
+    try:
+        handles = list(driver.window_handles)
+        for handle in handles:
+            if handle in keep:
+                driver.switch_to.window(handle)
+                return
+        if handles:
+            driver.switch_to.window(handles[0])
+    except Exception:
+        pass
+
+
+class WindowGuard:
+    """Tracks the ONE popup a trusted click is allowed to open and prunes the rest.
+
+    Take the snapshot BEFORE the click (`WindowGuard(driver, main_window)`),
+    then call `prune()` on every poll while the site's timer runs. The first
+    handle that appears after the snapshot is the popup the click opened and
+    is kept (the page's JS watches it and closes it itself); anything that
+    appears later is an advertiser pop-under and is closed. Until the popup
+    shows up nothing is pruned, so a popup the page opens a moment after the
+    click is never mistaken for an ad.
+    """
+
+    def __init__(self, driver, main_window):
+        self.driver = driver
+        self.main_window = main_window
+        self.popup = None
+        try:
+            self.before = set(driver.window_handles)
+        except Exception:
+            self.before = {main_window}
+
+    @property
+    def allowed(self):
+        return {self.main_window, self.popup} if self.popup else {self.main_window}
+
+    def prune(self):
+        """Close pop-unders. Returns True if any window was closed."""
+        try:
+            handles = list(self.driver.window_handles)
+        except Exception:
+            return False
+        if self.popup is None:
+            new = [h for h in handles if h not in self.before]
+            if not new:
+                return False
+            self.popup = new[0]
+        if all(h in self.allowed for h in handles):
+            return False
+        close_extra_windows(self.driver, keep=self.allowed)
+        return True
 
 
 def seconds_from_text(text, default):
@@ -190,15 +252,42 @@ def body_text(driver):
         return ""
 
 
-def is_browser_alive(driver):
-    """True while the browser session answers; False once it's been closed."""
+# Messages chromedriver/urllib3 produce once the browser or driver is really gone.
+# Session-level only. Tab-level errors ("disconnected: not connected to
+# DevTools", "target window already closed", "no such window") are NOT here:
+# a crashed or vanished tab is 'unresponsive', never 'closed'.
+_DEAD_SESSION_MARKERS = (
+    "invalid session id", "chrome not reachable", "session deleted",
+    "connection refused",
+)
+
+
+def browser_state(driver):
+    """'alive', 'unresponsive' (a call failed but the browser still exists) or 'closed'.
+
+    Only a definite dead-session error, or a driver process that has exited,
+    counts as closed. Anything else (HTTP timeout, a crashed tab, a slow
+    enumeration of hundreds of pop-under tabs) is 'unresponsive': the loops
+    keep going and the GUI must NOT declare the browser gone.
+    """
     if driver is None:
-        return False
+        return "closed"
     try:
         _ = driver.window_handles
-        return True
-    except Exception:
-        return False
+        return "alive"
+    except Exception as e:
+        text = f"{e.__class__.__name__}: {e}".lower()
+    process = getattr(getattr(driver, "service", None), "process", None)
+    if process is not None and process.poll() is not None:
+        return "closed"
+    if any(m in text for m in _DEAD_SESSION_MARKERS):
+        return "closed"
+    return "unresponsive"
+
+
+def is_browser_alive(driver):
+    """True while the browser exists (even if momentarily unresponsive)."""
+    return browser_state(driver) != "closed"
 
 
 def is_logged_in(driver):

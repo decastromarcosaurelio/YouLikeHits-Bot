@@ -12,3 +12,10 @@ node_modules/
 out/
 .serena/
 settings.json
+
+# Agent tooling (BMAD, Claude Code, Agent Skills)
+_bmad/
+_bmad-output/
+.agents/
+.claude/
+skills-lock.json

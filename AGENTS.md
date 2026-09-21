@@ -7,8 +7,7 @@ Bot em Python que automatiza tarefas de troca no YouLikeHits.com via Selenium co
 
 ## Política
 
-- Nunca apague nem comite `chrome_profile/`; ele guarda a sessão logada do YouLikeHits e o login é sempre manual no navegador.
-- Mantenha `_bmad/`, `_bmad-output/`, `.agents/` e `.claude/` fora do git; não use `git add -A` na raiz.
+- Mantenha `_bmad/`, `_bmad-output/`, `.agents/` e `.claude/` no `.gitignore`.
 
 ## Onde ficam as coisas
 
@@ -35,6 +34,8 @@ Bot em Python que automatiza tarefas de troca no YouLikeHits.com via Selenium co
 - O site só credita pontos se o clique for confiável (`event.isTrusted`), e o timer roda no JavaScript da própria página. Clique sempre com `element.click()` do Selenium, nunca via `execute_script`, e espere o resultado (`.wh-result` / `#showresult`) em vez de dormir um tempo fixo. `bot_logic/earn.py` encapsula isso para YouTube e SoundCloud.
 - Bônus resgatável (verificado ao vivo): `.bonus-pill--active` "Unclaimed Points: +N" e `a.buybutton` "Claim N Points Now" com `href="?step=get"`. Após o clique a página `?step=get` ainda mostra o total antigo no cabeçalho; releia os pontos numa navegação nova.
 - `:contains()` não é CSS válido no Selenium; um teste guarda isso.
+- O bloqueador de popup do Chrome fica ligado (`--disable-popup-blocking` foi removido e um teste guarda isso): os popups do próprio site vêm do clique confiável e passam; a flag só servia aos pop-unders dos anunciantes. Sites visitados abrem pop-unders durante todo o timer, por isso `utils.WindowGuard` tira um snapshot antes do clique, aceita só a primeira janela nova e fecha o resto a cada poll do `wait_until`.
+- `utils.browser_state` distingue `alive`, `unresponsive` e `closed`. Só erro de sessão morta ou processo do chromedriver encerrado é `closed`; timeout ou erro de aba é `unresponsive`, a GUI mostra "Browser Not Responding" e continua vigiando. Visto ao vivo em 2026-09-20: um site abriu 1.100 abas, `window_handles` falhou e a GUI declarou "Browser was closed" com o navegador aberto.
 
 ## Armadilhas conhecidas
 

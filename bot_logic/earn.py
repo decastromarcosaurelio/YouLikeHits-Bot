@@ -14,6 +14,7 @@ from selenium.webdriver.common.by import By
 from selenium.common.exceptions import WebDriverException
 from .utils import (
     random_delay, wait_unless_stopped, wait_until, close_extra_windows,
+    WindowGuard,
 )
 
 EARN_BUTTON = "#listall a.earn-btn"
@@ -58,13 +59,19 @@ def process_earn_cards_once(driver, log, is_stopped, *, page, label, default_sec
         main_window = driver.current_window_handle
         try:
             log(f"{label} ({seconds}s timer)...")
+            close_extra_windows(driver, keep=main_window)   # snapshot must be just the YLH tab
+            guard = WindowGuard(driver, main_window)
             button.click()
 
             # The page's JS closes the popup and writes the outcome into #showresult.
-            outcome = wait_until(
-                lambda: (lambda t: t if t and t != before else None)(_result_text(driver)),
-                timeout=seconds + MAX_EXTRA_WAIT, is_stopped=is_stopped, step=1.0,
-            )
+            # Pop-unders spawned meanwhile are pruned on every poll.
+            def _poll():
+                guard.prune()
+                driver.switch_to.window(main_window)
+                text = _result_text(driver)
+                return text if text and text != before else None
+            outcome = wait_until(_poll, timeout=seconds + MAX_EXTRA_WAIT,
+                                 is_stopped=is_stopped, step=1.0)
             close_extra_windows(driver, keep=main_window)
             if outcome is None:
                 if is_stopped():
