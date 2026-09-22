@@ -2,7 +2,9 @@
 import unittest
 from unittest import mock
 
-from bot_logic import utils, websites, youtube, soundcloud, bonus, master, earn
+from bot_logic import (
+    utils, websites, youtube, soundcloud, bonus, master, earn, youtube_likes, soundcloud_follows,
+)
 from tests.fakes import FakeDriver, FakeElement, logged_in
 
 
@@ -37,6 +39,8 @@ class SharedBehaviourTests(unittest.TestCase):
     def test_every_task_exits_when_not_logged_in(self):
         for task in (websites._run_website_task, youtube._run_youtube_task,
                      soundcloud._run_soundcloud_task, bonus._run_bonus_task,
+                     youtube_likes._run_youtube_likes_task,
+                     soundcloud_follows._run_soundcloud_follows_task,
                      master._run_master_task):
             with self.subTest(task=task.__name__), _no_sleep():
                 logs = []
@@ -55,7 +59,7 @@ class SharedBehaviourTests(unittest.TestCase):
         self.assertIsNone(utils.get_points(FakeDriver()))
 
     def test_selectors_are_valid_css(self):
-        for sel in (websites.VISIT_SELECTOR, websites.SKIP_SELECTOR, earn.EARN_BUTTON,
+        for sel in (websites.VISIT_SELECTOR, websites.SKIP_SELECTOR, earn.EARN_BUTTON, earn.LIST_BOX,
                     youtube.BUTTON_SELECTOR, soundcloud.BUTTON_SELECTOR, bonus.CLAIM_CANDIDATES,
                     youtube.CAPTCHA_SELECTOR, utils.LOGOUT_LINK, utils.POINTS_SPAN):
             self.assertNotIn(":contains", sel)
@@ -86,8 +90,50 @@ class WebsitesTests(unittest.TestCase):
 
     def test_empty_state(self):
         d = FakeDriver(body="There are no websites to visit right now.", elements=logged_in())
+        logs = []
         with _no_sleep():
-            self.assertEqual(websites.process_websites_once(d, lambda m: None, lambda: False), 0)
+            self.assertEqual(websites.process_websites_once(d, logs.append, lambda: False), 0)
+        self.assertFalse(any("site may have changed" in m for m in logs), logs)
+
+    def test_missing_button_without_notice_warns(self):
+        d = FakeDriver(body="LION SHARE\nsome card layout we do not know", elements=logged_in())
+        logs = []
+        with _no_sleep():
+            self.assertEqual(websites.process_websites_once(d, logs.append, lambda: False), 0)
+        self.assertTrue(any("site may have changed" in m and websites.VISIT_SELECTOR in m for m in logs), logs)
+
+    def test_dead_session_is_reported_as_logged_out(self):
+        d = FakeDriver(body="Username\nPassword\nLogin")
+        logs = []
+        with _no_sleep():
+            self.assertEqual(websites.process_websites_once(d, logs.append, lambda: False), 0)
+        self.assertTrue(any("not logged in" in m.lower() for m in logs), logs)
+        self.assertFalse(any("site may have changed" in m for m in logs), logs)
+
+    def test_unresponsive_tab_is_not_a_changed_site(self):
+        d = FakeDriver(elements=logged_in())
+        def boom(*a, **k):
+            raise RuntimeError("timed out receiving message from renderer")
+        d.find_elements = boom; d.find_element = boom
+        logs = []
+        with _no_sleep():
+            self.assertEqual(websites.process_websites_once(d, logs.append, lambda: False), 0)
+        self.assertFalse(any("site may have changed" in m or "not logged in" in m.lower() for m in logs), logs)
+
+    def test_result_is_logged_on_one_line(self):
+        d = self._page()
+        d.elements["#wh-visit"][0]._on_click = None
+        def on_visit():
+            d.window_handles.append("popup")
+            d.elements[".wh-result"] = [FakeElement("You earned 7 points!\nLoading the next site...")]
+            d.elements.pop("#wh-visit")
+        d.elements["#wh-visit"][0]._on_click = on_visit
+        logs = []
+        with _no_sleep():
+            self.assertEqual(websites.process_websites_once(d, logs.append, lambda: False), 1)
+        line = next(m for m in logs if "Website viewed" in m)
+        self.assertNotIn("\n", line)
+        self.assertIn("Loading the next site", line)
 
     def test_popunder_flood_is_pruned_during_timer(self):
         """A visited site spawning pop-unders while the timer runs must not
@@ -157,13 +203,14 @@ class EarnCardTests(unittest.TestCase):
             "imageWin(2724633,'FGOU6G0Dsuc','124','b53f',0,event);", 60), ("2724633", 124))
         self.assertEqual(earn.parse_earn_button("garbage", 60), (None, 60))
 
-    def _page(self, onclick, credited=True):
+    def _page(self, onclick, credited=True, result=None):
         d = FakeDriver(elements=logged_in())
         d.elements["#showresult"] = [FakeElement("")]
 
         def on_click():
             d.window_handles.append("popup")
-            d.elements["#showresult"] = [FakeElement("You earned 7 points!" if credited else "Video no longer available")]
+            d.elements["#showresult"] = [FakeElement(
+                result or ("You earned 7 points!" if credited else "Video no longer available"))]
             d.elements.pop("#listall a.earn-btn")
         d.elements["#listall a.earn-btn"] = [FakeElement("View", on_click=on_click, attrs={"onclick": onclick})]
         return d
@@ -203,6 +250,54 @@ class EarnCardTests(unittest.TestCase):
         d = self._page("imageWin(213182,'2402576103','69','k',event);", credited=False)
         with _no_sleep():
             self.assertEqual(soundcloud.process_soundcloud_once(d, lambda m: None, lambda: False), 0)
+
+    def test_site_empty_notice_is_not_a_missing_button(self):
+        # Live 2026-09-21: #listall holds only the notice and no a.earn-btn.
+        d = FakeDriver(elements=logged_in())
+        d.elements["#listall"] = [FakeElement("There are no more songs to play for points. Check back later!")]
+        logs = []; clock = _FakeClock()
+        with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
+            self.assertEqual(soundcloud.process_soundcloud_once(d, logs.append, lambda: False), 0)
+        self.assertFalse(any("site may have changed" in m for m in logs), logs)
+        self.assertLess(clock.now, 8)      # no 8 s hunt for a button the site says is gone
+
+    def test_missing_button_without_notice_warns(self):
+        d = FakeDriver(body="Start Watching\nsome card layout we do not know", elements=logged_in())
+        d.elements["#listall"] = [FakeElement("Some Video Title")]
+        logs = []
+        with _no_sleep():
+            self.assertEqual(youtube.process_youtube_once(d, logs.append, lambda: False), 0)
+        self.assertTrue(any("site may have changed" in m and earn.EARN_BUTTON in m for m in logs), logs)
+
+    def test_dead_session_is_reported_as_logged_out(self):
+        # A dead session is sent to login.php: no #listall, no button, no notice, no #logoutlink.
+        d = FakeDriver(body="Username\nPassword\nLogin")
+        logs = []
+        with _no_sleep():
+            self.assertEqual(soundcloud.process_soundcloud_once(d, logs.append, lambda: False), 0)
+        self.assertTrue(any("not logged in" in m.lower() for m in logs), logs)
+        self.assertFalse(any("site may have changed" in m for m in logs), logs)
+
+    def test_unresponsive_tab_does_not_kill_the_loop(self):
+        d = FakeDriver(elements=logged_in())
+        def boom(*a, **k):
+            raise RuntimeError("timed out receiving message from renderer")
+        d.find_elements = boom; d.find_element = boom
+        logs = []; clock = _FakeClock()
+        with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
+            self.assertEqual(youtube.process_youtube_once(d, logs.append, lambda: False), 0)
+        self.assertGreaterEqual(clock.now, 8)   # hunted for the button, then gave up quietly
+        self.assertFalse(any("site may have changed" in m or "not logged in" in m.lower() for m in logs), logs)
+
+    def test_result_is_logged_on_one_line(self):
+        d = self._page("imageWin(1,'abc','124','x',0,event);",
+                       result='You viewed "Dormir Melhor Hoje"!\n5 Points Added!')
+        logs = []
+        with _no_sleep():
+            self.assertEqual(youtube.process_youtube_once(d, logs.append, lambda: False), 1)
+        line = next(m for m in logs if "credited" in m)
+        self.assertNotIn("\n", line)
+        self.assertIn("5 Points Added!", line)
 
     def test_captcha_pauses(self):
         d = FakeDriver(elements={**logged_in(), "img[src*='captchayt']": [FakeElement()]})
@@ -248,7 +343,7 @@ class MasterTests(unittest.TestCase):
         stop = lambda: any(soundcloud.PAGE in url for url in d.visited)
         with _no_sleep():
             master._run_master_task(d, stop, logs.append, lambda p: None)
-        for page in (bonus.PAGE, websites.PAGE, youtube.PAGE, soundcloud.PAGE):
+        for page in (bonus.PAGE, websites.PAGE, youtube.PAGE, youtube_likes.PAGE, soundcloud.PAGE):
             self.assertTrue(any(page in url for url in d.visited), page)
         self.assertIn("Master loop stopped.", logs)
 

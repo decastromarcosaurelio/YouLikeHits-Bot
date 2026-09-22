@@ -290,14 +290,39 @@ def is_browser_alive(driver):
     return browser_state(driver) != "closed"
 
 
+def _has_session(driver):
+    """Logout link present and logged-out marker absent. Raises on driver errors."""
+    if driver.find_elements(By.CSS_SELECTOR, LOGGED_OUT_MARKER):
+        return False
+    return bool(driver.find_elements(By.CSS_SELECTOR, LOGOUT_LINK))
+
+
 def is_logged_in(driver):
     """True when the page shows the Logout link (only rendered for a live session)."""
     try:
-        if driver.find_elements(By.CSS_SELECTOR, LOGGED_OUT_MARKER):
-            return False
-        return bool(driver.find_elements(By.CSS_SELECTOR, LOGOUT_LINK))
+        return _has_session(driver)
     except Exception:
         return False
+
+
+def why_no_item(driver, says_empty):
+    """Diagnose a task page that shows no item to work on.
+
+    `says_empty(driver)` reads the page and returns True when the site itself
+    says the list is empty; it may raise. Returns one of:
+      'empty'      the site says so (normal; the task loop reports it),
+      'logged_out' the session died (the site sends dead sessions to login.php),
+      'unknown'    page readable, logged in, no notice: the site may have changed,
+      'unreadable' the tab raised; the GUI's browser watch reports that.
+    """
+    try:
+        if says_empty(driver):
+            return "empty"
+        if not _has_session(driver):
+            return "logged_out"
+    except Exception:
+        return "unreadable"
+    return "unknown"
 
 
 def get_points(driver):

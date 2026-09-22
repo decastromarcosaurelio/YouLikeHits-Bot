@@ -11,7 +11,7 @@ from selenium.common.exceptions import WebDriverException
 from .utils import (
     is_logged_in, navigate_to, check_service_unavailable, random_delay,
     get_points, body_text, wait_unless_stopped, wait_until, close_extra_windows,
-    WindowGuard,
+    WindowGuard, why_no_item,
     seconds_from_text, run_cli_task,
 )
 
@@ -30,6 +30,12 @@ def _find(driver, selector):
     return els[0] if els else None
 
 
+def _page_says_empty(driver):
+    """True when the site itself says there is nothing to visit. Raises on driver errors."""
+    text = driver.find_element(By.TAG_NAME, "body").text.lower()
+    return any(m in text for m in NO_ITEMS_MARKERS)
+
+
 def process_websites_once(driver, log, is_stopped, limit=None):
     """View sites until the page runs dry, `limit` is reached, or we are stopped.
 
@@ -45,6 +51,14 @@ def process_websites_once(driver, log, is_stopped, limit=None):
 
         visit = wait_until(lambda: _find(driver, VISIT_SELECTOR), timeout=8, is_stopped=is_stopped)
         if not visit:
+            if not is_stopped():
+                # A bare "No websites available" from the task loop would hide the cause.
+                reason = why_no_item(driver, _page_says_empty)
+                if reason == "logged_out":
+                    log("Websites: not logged in any more. Log in again in the browser window.")
+                elif reason == "unknown":
+                    log(f"No '{VISIT_SELECTOR}' on the page and no 'no websites' notice; "
+                        "the site may have changed.")
             break
 
         status = _find(driver, STATUS_SELECTOR)
@@ -76,7 +90,7 @@ def process_websites_once(driver, log, is_stopped, limit=None):
                     skip.click()
                 continue
 
-            text = result.text.strip()
+            text = " ".join(result.text.split())
             if "earned" in text.lower():
                 viewed += 1
                 log(f"Website viewed: {text}")

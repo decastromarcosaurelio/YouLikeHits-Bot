@@ -19,12 +19,14 @@ from bot_logic.utils import setup_browser, browser_state, YLH_BASE
 from bot_logic import settings as settings_mod
 
 LOOPS = [
-    # key,          label,                 icon
-    ("websites",   "Website Views",   "🔗"),
-    ("youtube",    "YouTube Views",   "▶"),
-    ("soundcloud", "SoundCloud Plays", "🎵"),
-    ("bonus",      "Daily Bonus",     "🎁"),
-    ("master",     "Master Loop (All)", "🔄"),
+    # key,                  label,                icon
+    ("websites",           "Website Views",      "🔗"),
+    ("youtube",            "YouTube Views",      "▶"),
+    ("youtube_likes",      "YouTube Likes",      "👍"),
+    ("soundcloud",         "SoundCloud Plays",   "🎵"),
+    ("soundcloud_follows", "SoundCloud Follows", "👥"),
+    ("bonus",              "Daily Bonus",        "🎁"),
+    ("master",             "Master Loop",        "🔄"),
 ]
 LOOP_COLOR = {"master": "#6c3483"}
 LOOP_HOVER = {"master": "#8e44ad"}
@@ -46,8 +48,12 @@ def _task_for(name):
         from bot_logic.websites import _run_website_task as task
     elif name == "youtube":
         from bot_logic.youtube import _run_youtube_task as task
+    elif name == "youtube_likes":
+        from bot_logic.youtube_likes import _run_youtube_likes_task as task
     elif name == "soundcloud":
         from bot_logic.soundcloud import _run_soundcloud_task as task
+    elif name == "soundcloud_follows":
+        from bot_logic.soundcloud_follows import _run_soundcloud_follows_task as task
     elif name == "bonus":
         from bot_logic.bonus import _run_bonus_task as task
     elif name == "master":
@@ -65,7 +71,7 @@ class BotGUI:
         self.root = ctk.CTk()
         self.root.title("YouLikeHits Autobot")
         self.root.geometry("960x720")
-        self.root.minsize(800, 560)
+        self.root.minsize(800, 720)   # the left column needs ~600 px of height
 
         self.settings = settings_mod.load()
         self.driver = None
@@ -142,21 +148,6 @@ class BotGUI:
 
         self._separator(left)
 
-        ctk.CTkLabel(left, text="Master Loop: wait between cycles (min)",
-                     font=ctk.CTkFont(size=11), text_color="#666").pack(pady=(0, 2))
-        wait_row = ctk.CTkFrame(left, fg_color="transparent")
-        wait_row.pack(pady=(0, 4))
-        self.wait_min_var = ctk.StringVar(value=f"{self.settings['cycle_wait_min_minutes']:g}")
-        self.wait_max_var = ctk.StringVar(value=f"{self.settings['cycle_wait_max_minutes']:g}")
-        ctk.CTkEntry(wait_row, width=58, justify="center", textvariable=self.wait_min_var).pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(wait_row, text="to", text_color="#888").pack(side="left")
-        ctk.CTkEntry(wait_row, width=58, justify="center", textvariable=self.wait_max_var).pack(side="left", padx=(4, 0))
-        self.wait_hint = ctk.CTkLabel(left, text="random wait in this range", font=ctk.CTkFont(size=10),
-                                      text_color="#555")
-        self.wait_hint.pack(pady=(0, 4))
-
-        self._separator(left)
-
         ctk.CTkLabel(left, text="Points Balance", font=ctk.CTkFont(size=11),
                      text_color="#666").pack(pady=(4, 0))
         self.points_big = ctk.CTkLabel(left, text="--",
@@ -166,6 +157,8 @@ class BotGUI:
 
         right = ctk.CTkFrame(body, fg_color="#16213e", corner_radius=12)
         right.pack(side="right", fill="both", expand=True)
+
+        self._build_master_settings(right)
 
         ctk.CTkLabel(right, text="Activity Log", font=ctk.CTkFont(size=15, weight="bold"),
                      text_color="#00d4ff").pack(pady=(12, 4))
@@ -181,6 +174,45 @@ class BotGUI:
         footer.pack_propagate(False)
         ctk.CTkLabel(footer, text="YouLikeHits Autobot  |  Use responsibly",
                      font=ctk.CTkFont(size=10), text_color="#555").pack(pady=4)
+
+    def _build_master_settings(self, parent):
+        """Master Loop panel: which tasks run and the wait between cycles.
+
+        Read and saved to settings.json when the Master Loop starts.
+        """
+        panel = ctk.CTkFrame(parent, fg_color="#1b2a4e", corner_radius=10)
+        panel.pack(fill="x", padx=10, pady=(10, 0))
+
+        ctk.CTkLabel(panel, text="🔄 Master Loop: tasks to include",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color="#c9d1d9").pack(anchor="w", padx=12, pady=(8, 2))
+
+        grid = ctk.CTkFrame(panel, fg_color="transparent")
+        grid.pack(fill="x", padx=8)
+        self.task_vars = {}
+        enabled = set(self.settings["master_tasks"])
+        for i, (key, label) in enumerate(settings_mod.TASKS):
+            var = ctk.BooleanVar(value=key in enabled)
+            self.task_vars[key] = var
+            ctk.CTkCheckBox(grid, text=label, variable=var, checkbox_width=18, checkbox_height=18,
+                            font=ctk.CTkFont(size=12)).grid(
+                row=i // 3, column=i % 3, sticky="w", padx=6, pady=3)
+        for col in range(3):
+            grid.grid_columnconfigure(col, weight=1)
+
+        wait_row = ctk.CTkFrame(panel, fg_color="transparent")
+        wait_row.pack(fill="x", padx=12, pady=(4, 8))
+        ctk.CTkLabel(wait_row, text="Wait between cycles (min):",
+                     font=ctk.CTkFont(size=11), text_color="#888").pack(side="left")
+        self.wait_min_var = ctk.StringVar(value=f"{self.settings['cycle_wait_min_minutes']:g}")
+        self.wait_max_var = ctk.StringVar(value=f"{self.settings['cycle_wait_max_minutes']:g}")
+        ctk.CTkEntry(wait_row, width=52, justify="center",
+                     textvariable=self.wait_min_var).pack(side="left", padx=(8, 4))
+        ctk.CTkLabel(wait_row, text="to", text_color="#888").pack(side="left")
+        ctk.CTkEntry(wait_row, width=52, justify="center",
+                     textvariable=self.wait_max_var).pack(side="left", padx=(4, 8))
+        ctk.CTkLabel(wait_row, text="random wait in this range", font=ctk.CTkFont(size=10),
+                     text_color="#555").pack(side="left")
 
     @staticmethod
     def _separator(parent):
@@ -313,7 +345,7 @@ class BotGUI:
             self._log("Browser is not responding. Wait for it to recover first.")
             return
 
-        if name == "master" and not self._apply_wait_settings():
+        if name == "master" and not self._apply_master_settings():
             return
 
         self.running_loop = name
@@ -324,8 +356,12 @@ class BotGUI:
         self._set_status_now(STATUS_RUNNING)
         threading.Thread(target=self._run_loop, args=(name,), daemon=True).start()
 
-    def _apply_wait_settings(self):
-        """Read the wait fields, persist them, and echo the effective range. False if invalid."""
+    def _apply_master_settings(self):
+        """Read the Master Loop panel, persist it, and echo what will run. False if invalid."""
+        tasks = [key for key, var in self.task_vars.items() if var.get()]
+        if not tasks:
+            self._log("Tick at least one task for the Master Loop.")
+            return False
         try:
             lo = float(self.wait_min_var.get().replace(",", "."))
             hi = float(self.wait_max_var.get().replace(",", "."))
@@ -333,12 +369,14 @@ class BotGUI:
             self._log("Wait between cycles must be numbers (minutes), e.g. 1 and 3.")
             return False
         self.settings = settings_mod.save({**self.settings,
+                                           "master_tasks": tasks,
                                            "cycle_wait_min_minutes": lo,
                                            "cycle_wait_max_minutes": hi})
         lo, hi = self.settings["cycle_wait_min_minutes"], self.settings["cycle_wait_max_minutes"]
         self.wait_min_var.set(f"{lo:g}")
         self.wait_max_var.set(f"{hi:g}")
-        self._log(f"Wait between cycles set to {lo:g}-{hi:g} min.")
+        names = ", ".join(settings_mod.TASK_LABELS[k] for k in self.settings["master_tasks"])
+        self._log(f"Master Loop: {names}; wait between cycles {lo:g}-{hi:g} min.")
         return True
 
     def _request_stop(self):

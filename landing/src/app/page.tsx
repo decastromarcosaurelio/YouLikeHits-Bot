@@ -10,9 +10,19 @@ const FEATURES = [
     desc: "Watch YouTube videos for points. Auto-submits after the timer; pauses for you when a captcha appears.",
   },
   {
+    icon: "👍",
+    title: "YouTube Likes",
+    desc: "Likes the video in the popup YouLikeHits opens, then confirms. Needs the bot's Chrome signed in to YouTube.",
+  },
+  {
     icon: "🎵",
     title: "SoundCloud Plays",
     desc: "Play SoundCloud tracks to earn points. Fully automated with random delays.",
+  },
+  {
+    icon: "👥",
+    title: "SoundCloud Follows",
+    desc: "Follows the profile in the popup, then confirms. Needs the bot's Chrome signed in to SoundCloud.",
   },
   {
     icon: "🎁",
@@ -22,7 +32,7 @@ const FEATURES = [
   {
     icon: "🔄",
     title: "Master Loop",
-    desc: "Cycles through all tasks automatically. Set it and forget it.",
+    desc: "Cycles through the tasks you tick, with a random wait between cycles. Set it and forget it.",
   },
   {
     icon: "🖥",
@@ -31,7 +41,14 @@ const FEATURES = [
   },
 ];
 
-const PLATFORMS = ["Website Views", "YouTube Views", "SoundCloud Plays", "Daily Bonus"];
+const PLATFORMS = [
+  "Website Views",
+  "YouTube Views",
+  "YouTube Likes",
+  "SoundCloud Plays",
+  "SoundCloud Follows",
+  "Daily Bonus",
+];
 
 export default function Home() {
   return (
@@ -47,8 +64,9 @@ export default function Home() {
         </h1>
         <p className="mx-auto mb-8 max-w-2xl text-lg text-gray-400">
           Free, open-source Python bot that automates social media exchange
-          tasks on YouLikeHits: website views, YouTube views, SoundCloud plays
-          and the daily bonus. Works on XFCE, KDE Plasma, and any Linux desktop.
+          tasks on YouLikeHits: website views, YouTube views and likes,
+          SoundCloud plays and follows, and the daily bonus. Works on XFCE, KDE
+          Plasma, and any Linux desktop.
         </p>
         <div className="flex flex-wrap justify-center gap-4">
           <a
@@ -128,9 +146,9 @@ cd YouLikeHits-Bot
               3. Start earning
             </h3>
             <p className="text-sm text-gray-400">
-              Start one loop: Website Views, YouTube, SoundCloud, Daily Bonus,
-              or the Master Loop to cycle through all of them. Stop responds
-              within a second.
+              Start one loop: Website Views, YouTube Views or Likes, SoundCloud
+              Plays or Follows, Daily Bonus, or the Master Loop to cycle through
+              the tasks you tick. Stop responds within a second.
             </p>
           </div>
           <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6">

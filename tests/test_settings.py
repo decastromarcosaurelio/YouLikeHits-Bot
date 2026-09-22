@@ -41,6 +41,39 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(settings.load(path), settings.DEFAULTS)
 
 
+class MasterTasksTests(unittest.TestCase):
+    def test_missing_or_garbage_means_all_tasks(self):
+        self.assertEqual(settings.validate({})["master_tasks"], list(settings.TASK_KEYS))
+        self.assertEqual(settings.validate({"master_tasks": "youtube"})["master_tasks"], list(settings.TASK_KEYS))
+        self.assertEqual(settings.validate({"master_tasks": 7})["master_tasks"], list(settings.TASK_KEYS))
+
+    def test_unknown_names_dropped_and_order_is_canonical(self):
+        s = settings.validate({"master_tasks": ["soundcloud_follows", "tiktok", 3, "bonus", "bonus"]})
+        self.assertEqual(s["master_tasks"], ["bonus", "soundcloud_follows"])
+        self.assertEqual(settings.enabled_tasks(s), ["bonus", "soundcloud_follows"])
+
+    def test_empty_selection_is_kept(self):
+        self.assertEqual(settings.validate({"master_tasks": []})["master_tasks"], [])
+
+    def test_defaults_are_not_shared(self):
+        s = settings.validate({})
+        s["master_tasks"].clear()
+        self.assertEqual(settings.DEFAULTS["master_tasks"], list(settings.TASK_KEYS))
+        self.assertEqual(settings.validate(None)["master_tasks"], list(settings.TASK_KEYS))
+
+    def test_new_quotas_are_validated(self):
+        s = settings.validate({"youtube_likes_per_cycle": 5, "soundcloud_follows_per_cycle": -1})
+        self.assertEqual(s["youtube_likes_per_cycle"], 5)
+        self.assertEqual(s["soundcloud_follows_per_cycle"], settings.DEFAULTS["soundcloud_follows_per_cycle"])
+        self.assertIn("youtube_likes_per_cycle", settings.QUOTA_KEYS)
+
+    def test_selection_round_trips_through_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            settings.save({"master_tasks": ["youtube_likes"]}, path)
+            self.assertEqual(settings.load(path)["master_tasks"], ["youtube_likes"])
+
+
 class MasterUsesSettingsTests(unittest.TestCase):
     def test_wait_range_and_quota_are_applied(self):
         d = FakeDriver(elements=logged_in())
