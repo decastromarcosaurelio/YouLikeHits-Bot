@@ -52,13 +52,21 @@ class FakeLikesSite:
     """youtubelikes.php + the youtube.com popup, as a stateful fake."""
 
     def __init__(self, driver, videos=("vid1",), reply="You earned 21 points!",
-                 signed_in=True, like_works=True, already_liked=False, popup_opens=True, revert=False):
+                 signed_in=True, like_works=True, already_liked=False, popup_opens=True, revert=False,
+                 retry_replies=None, advance_on_exhaustion=False):
         self.d = driver
         self.revert = revert
         self.remaining = list(videos)
         self.reply, self.signed_in, self.like_works = reply, signed_in, like_works
         self.already_liked, self.popup_opens = already_liked, popup_opens
+        self.advance_on_exhaustion = advance_on_exhaustion
+        # `retry_replies`: replies the site serves on each "Verify My Like
+        # Again" click after the first check fails (live 2026-09-22). When the
+        # list runs out, the retry button stops appearing (the site advances on
+        # its own). None means the site never offers a retry.
+        self.retry_replies = list(retry_replies) if retry_replies is not None else None
         self.like_buttons, self.confirm_clicks, self.stage2_clicks = [], 0, 0
+        self.verify_again_clicks, self.skip_clicks = 0, 0
         driver.on_get = lambda url: self.reset()
         self.reset()
 
@@ -95,12 +103,63 @@ class FakeLikesSite:
         d.elements.pop("#FBBox a.earn-btn")
         d.elements["#ylhManualBtn"] = [FakeElement("I'm done", on_click=lambda: self._verify(vid))]
 
-    def _verify(self, vid):
+    def _verify(self, vid, reply=None):
         self.confirm_clicks += 1
-        if engage.CREDITED_RE.search(self.reply) and vid in self.remaining:
+        self._settle(vid, self.reply if reply is None else reply)
+
+    def _verify_again(self, vid):
+        """What the "Verify My Like Again" button does: re-check with the next reply.
+
+        When the retries run out, the live site (2026-09-22) drops the retry
+        button, shows "We still couldn't verify your Like... try another one",
+        and re-renders the first "Like Video" stage for the NEXT video. Model
+        that with `advance_on_exhaustion=True`.
+        """
+        self.verify_again_clicks += 1
+        self._clear_retry_controls()
+        if self.retry_replies:
+            self._settle(vid, self.retry_replies.pop(0))
+            return
+        # Exhausted.
+        self.d.elements["#FBPoints"] = [FakeElement(
+            "We still couldn't verify your Like. Please make sure you Liked the "
+            "video on YouTube, then try another one.")]
+        if self.advance_on_exhaustion:
+            self.remaining = self.remaining[1:]     # the site moved past this video
+            self._show_next_stage()
+
+    def _show_next_stage(self):
+        """Re-render the first "Like Video" stage for the next video (site-driven advance)."""
+        self.d.elements["#listall .cards"] = []
+        nxt = self.remaining[0] if self.remaining else "next"
+        self.d.elements["#FBBox a.earn-btn"] = [FakeElement(
+            "Like Video", on_click=lambda: self._open_popup(nxt))]
+
+    def _settle(self, vid, reply):
+        d = self.d
+        if engage.CREDITED_RE.search(reply) and vid in self.remaining:
             self.remaining.remove(vid)
-        self.d.elements["#FBPoints"] = [_Replies(["Hang tight — checking with YouTube. 8s",
-                                                  "Confirming your Like…", self.reply])]
+        d.elements["#FBPoints"] = [_Replies(["Hang tight — checking with YouTube. 8s",
+                                             "Confirming your Like…", reply])]
+        # After a failed check the live site offers a retry button + a skip link
+        # (verified 2026-09-22). The failure text is "We couldn't verify your
+        # Like just yet", so the presence of the button -- not the wording -- is
+        # what marks it a failure. `retry_replies` being a list (even empty)
+        # means the site offers the retry; None means it never does.
+        if self.retry_replies is not None and not engage.CREDITED_RE.search(reply):
+            d.elements["#FBPoints button"] = [FakeElement("Verify My Like Again",
+                                                          on_click=lambda: self._verify_again(vid))]
+            d.elements["#FBPoints a"] = [FakeElement("[Skip this Video]", on_click=self._skip)]
+        else:
+            self._clear_retry_controls()
+
+    def _clear_retry_controls(self):
+        self.d.elements.pop("#FBPoints button", None)
+        self.d.elements.pop("#FBPoints a", None)
+
+    def _skip(self):
+        self.skip_clicks += 1
+        self._clear_retry_controls()
 
 
 class FakeFollowSite:
@@ -226,6 +285,65 @@ class YouTubeLikesTests(unittest.TestCase):
         self.assertEqual(site.confirm_clicks, 2)
         self.assertEqual(site.remaining, ["v1"])
 
+    def test_verify_again_retry_that_finally_credits(self):
+        # Live 2026-09-22: a Like YouTube was slow to report shows "We couldn't
+        # verify your Like just yet" + a "Verify My Like Again" button; clicking
+        # it re-checks and can then credit.
+        d = FakeDriver(elements=logged_in())
+        site = FakeLikesSite(d, reply="We couldn't verify your Like just yet.",
+                             retry_replies=["You got 21 Points for liking the video!"])
+        logs = []
+        with _no_sleep():
+            self.assertEqual(youtube_likes.process_youtube_likes_once(d, logs.append, lambda: False), 1)
+        self.assertEqual(site.confirm_clicks, 1)
+        self.assertEqual(site.verify_again_clicks, 1)          # the bot asked the site to re-check once
+        self.assertEqual(site.skip_clicks, 0)                  # credited, so never skipped
+        self.assertTrue(any("verify again (attempt 1)" in m.lower() for m in logs), logs)
+        self.assertTrue(any("credited: You got 21 Points" in m for m in logs), logs)
+
+    def test_verify_again_exhausted_moves_on_without_stalling(self):
+        # After the retries run out the like is still unconfirmed; the bot must
+        # advance (skip if the site still shows one, else reload) instead of
+        # retrying the same card forever.
+        d = FakeDriver(elements=logged_in())
+        site = FakeLikesSite(d, videos=("v1", "v2"), reply="We couldn't verify your Like just yet.",
+                             retry_replies=["We still couldn't verify your Like."])
+        logs = []; clock = _FakeClock()
+        with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
+            self.assertEqual(youtube_likes.process_youtube_likes_once(d, logs.append, lambda: False), 0)
+        self.assertGreaterEqual(site.verify_again_clicks, 1)   # retried what the site offered
+        self.assertTrue(any("not credited" in m for m in logs), logs)
+        self.assertLess(clock.now, engage.VERIFY_WAIT)         # did not hang
+        # Both cards were worked through (the pass ended), proving it did not stall.
+        self.assertTrue(any(youtube_likes.PAGE in u for u in d.visited), logs)
+
+    def test_site_advancing_on_its_own_does_not_hang_or_skip_the_next_video(self):
+        # Live bug 2026-09-22: after "Verify My Like Again" ran out, the site
+        # dropped the retry button, showed "We still couldn't verify your
+        # Like... try another one", and re-rendered the "Like Video" stage for
+        # the NEXT video. The bot hung waiting for a verdict that never came.
+        # It must detect the advance, not hang, and not skip the fresh card.
+        d = FakeDriver(elements=logged_in())
+        site = FakeLikesSite(d, videos=("v1", "v2"), reply="We couldn't verify your Like just yet.",
+                             retry_replies=[], advance_on_exhaustion=True)
+        logs = []; clock = _FakeClock()
+        with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
+            youtube_likes.process_youtube_likes_once(d, logs.append, lambda: False, limit=1)
+        self.assertGreaterEqual(site.verify_again_clicks, 1)   # asked the site to verify again
+        self.assertEqual(site.skip_clicks, 0)                  # never clicked Skip on the fresh card
+        self.assertTrue(any("not credited" in m for m in logs), logs)
+        self.assertLess(clock.now, engage.VERIFY_WAIT)         # did not hang for the full timeout
+
+    def test_verify_again_is_capped_at_max_retries(self):
+        # The site keeps offering the retry, but the bot stops after MAX_VERIFY_RETRIES.
+        d = FakeDriver(elements=logged_in())
+        site = FakeLikesSite(d, reply="We couldn't verify your Like just yet.",
+                             retry_replies=["We couldn't verify your Like just yet."] * 10)
+        with _no_sleep():
+            self.assertEqual(youtube_likes.process_youtube_likes_once(d, lambda m: None, lambda: False, limit=1), 0)
+        self.assertEqual(site.verify_again_clicks, engage.MAX_VERIFY_RETRIES)
+        self.assertGreaterEqual(site.skip_clicks, 1)
+
     def test_success_wording_wins_over_loading_words(self):
         d = FakeDriver(elements=logged_in())
         site = FakeLikesSite(d, reply="Success! You liked the video! You got 22 Points! Loading the next video...")
@@ -265,13 +383,16 @@ class YouTubeLikesTests(unittest.TestCase):
         self.assertEqual(site.stage2_clicks, 1)
         self.assertTrue(any("did not open" in m for m in logs), logs)
 
-    def test_verification_that_never_replies_reloads(self):
+    def test_verification_that_never_replies_moves_on(self):
         d = FakeDriver(elements=logged_in()); site = FakeLikesSite(d)
-        site._verify = lambda vid: d.elements.__setitem__("#FBPoints", [FakeElement("Hang tight — checking with YouTube. 8s")])
+        site._verify = lambda vid, reply=None: d.elements.__setitem__(
+            "#FBPoints", [FakeElement("Hang tight — checking with YouTube. 8s")])
         logs = []; clock = _FakeClock()
         with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
             self.assertEqual(youtube_likes.process_youtube_likes_once(d, logs.append, lambda: False), 0)
-        self.assertTrue(any(f"no verdict after {engage.VERIFY_WAIT}s" in m and "Hang tight" in m for m in logs), logs)
+        # No verdict and no retry button: the bot gives up on this card (there is
+        # no skip control here, so it reloads) instead of hanging.
+        self.assertTrue(any("no verdict after the checks" in m for m in logs), logs)
 
     def test_limit_and_stop(self):
         d = FakeDriver(elements=logged_in()); FakeLikesSite(d, videos=("a", "b", "c"))

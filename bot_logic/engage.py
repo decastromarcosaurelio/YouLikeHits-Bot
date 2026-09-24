@@ -49,6 +49,8 @@ POPUP_WAIT = 15          # for the popup window to appear after the click
 CONFIRM_WAIT = 10        # for the YLH confirm control to appear
 VERIFY_WAIT = 90         # for the site's final verdict (it re-checks by itself a few times)
 SETTLE_WAIT = 15         # unknown wording counts as final once unchanged for this long
+VERIFY_AGAIN_WAIT = 5    # for a "verify again" control to appear after a failed check
+MAX_VERIFY_RETRIES = 3   # how many times to click the site's own "verify again" before giving up
 
 # Verdicts of the verification reply. Order matters: a success text may
 # also say "loading the next video"; a "checking again" text also says
@@ -80,6 +82,23 @@ class Flow:
     open_popup: Callable  # (driver, card, is_stopped) -> bool: click(s) that open the popup
     act: Callable         # (driver, log, is_stopped) -> DONE | NOT_SIGNED_IN | NOT_FOUND, inside the popup
     describe: Callable    # (card) -> short text for the log
+    # Optional: when the site offers its own "verify again" retry after a failed
+    # check (YouTube Likes: "We couldn't verify your Like just yet" + "Verify My
+    # Like Again", "N more attempt available"), `verify_again` returns that
+    # button so the bot clicks it and re-checks, up to `max_retries` times.
+    # `skip` returns the site's Skip control, clicked to advance the card
+    # in-place when verification never credits (better than reloading, which can
+    # bring back the same item). Each is a callable (driver) -> element | None.
+    # SoundCloud has neither; leave them None.
+    verify_again: Callable = None
+    skip: Callable = None
+    max_retries: int = MAX_VERIFY_RETRIES
+    # Optional (driver) -> bool: True once the site has moved past this card on
+    # its own (YouTube Likes: after the retries run out it drops the failure
+    # message and re-shows the "Like Video" stage for the next video). This is
+    # a terminal "not credited" signal, so the bot stops waiting for a verdict
+    # that will never come and advances instead of hanging for VERIFY_WAIT.
+    advanced: Callable = None
 
 
 def _first(driver, selector):
@@ -92,6 +111,25 @@ def first_displayed(driver, selector):
     for el in driver.find_elements(By.CSS_SELECTOR, selector):
         try:
             if el.is_displayed():
+                return el
+        except WebDriverException:
+            continue
+    return None
+
+
+def displayed_with_text(driver, selector, needle):
+    """First displayed element matching `selector` whose text contains `needle`.
+
+    The needle is matched case-insensitively against the element's text. Used
+    to find YLH's own controls by their stable English label (e.g. "Verify My
+    Like Again") when they carry no distinctive id -- the site is not
+    localised, so matching by that text is safe here (unlike the YouTube /
+    SoundCloud buttons, which are localised and must never be matched by text).
+    """
+    needle = (needle or "").lower()
+    for el in driver.find_elements(By.CSS_SELECTOR, selector):
+        try:
+            if el.is_displayed() and needle in (el.text or "").lower():
                 return el
         except WebDriverException:
             continue
@@ -229,56 +267,137 @@ def process_engage_cards_once(driver, log, is_stopped, flow, limit=None):
                 continue
             before, _ = _result(driver, flow)
             confirm.click()
+            reply = _await_verdict(driver, flow, guard, main_window, before, is_stopped)
 
-            # The page's JS verifies with the site and writes the reply into the
-            # result box; it may re-check by itself several times ("Checking
-            # again...") before the final verdict. Ads are pruned meanwhile.
-            seen = {"text": "", "since": None, "last": ""}
+            # The site may offer its own "verify again" retry after a failed
+            # check (YouTube Likes: "We couldn't verify your Like just yet"). If
+            # the flow describes that button, click it and re-check, so a Like
+            # YouTube was slow to report still lands, instead of being dropped.
+            attempts = 0
+            while (flow.verify_again and not is_stopped()
+                   and (reply is None or reply[0] in (FAILED, UNKNOWN))
+                   and attempts < flow.max_retries):
+                again = wait_until(lambda: flow.verify_again(driver),
+                                   timeout=VERIFY_AGAIN_WAIT, is_stopped=is_stopped)
+                if not again:
+                    break               # the site did not offer a retry; take the verdict as-is
+                attempts += 1
+                log(f"{flow.label}: like not confirmed yet; asking the site to verify again "
+                    f"(attempt {attempts}).")
+                before, _ = _result(driver, flow)
+                again.click()
+                reply = _await_verdict(driver, flow, guard, main_window, before, is_stopped)
 
-            def _poll():
-                guard.prune()
-                driver.switch_to.window(main_window)
-                text, html = _result(driver, flow)
-                if not text or text == before:
-                    return None
-                seen["last"] = text
-                verdict = classify(text, html)
-                if verdict in (CREDITED, FAILED):
-                    return verdict, text
-                if verdict == PENDING:
-                    seen["text"] = ""
-                    return None
-                now = time.monotonic()      # unknown wording: final once it stops changing
-                if text != seen["text"]:
-                    seen["text"], seen["since"] = text, now
-                elif now - seen["since"] >= SETTLE_WAIT:
-                    return UNKNOWN, text
-                return None
-            reply = wait_until(_poll, timeout=VERIFY_WAIT, is_stopped=is_stopped, step=0.5)
             close_extra_windows(driver, keep=main_window)
-            if reply is None:
-                if is_stopped():
-                    break
-                log(f"{flow.label}: no verdict after {VERIFY_WAIT}s "
-                    f"(last seen: {one_line(seen['last']) or 'nothing'}); reloading.")
+            if is_stopped():
+                break
+
+            if reply is not None and reply[0] == CREDITED:
+                done += 1
+                log(f"{flow.label} credited: {one_line(reply[1])}")
+                random_delay(2, 5, is_stopped)
                 _reload(driver, flow)
                 continue
 
-            verdict, text = reply
-            if verdict == CREDITED:
-                done += 1
-                log(f"{flow.label} credited: {one_line(text)}")
-            elif verdict == FAILED:
-                log(f"{flow.label} not credited: {one_line(text)}")
+            # Not credited (failed, unknown, or no verdict at all). Advance the
+            # card: click the site's Skip if the flow has one (it changes the
+            # item in-place; reloading can bring the same one back and stall).
+            if reply is None:
+                log(f"{flow.label}: no verdict after the checks; moving on.")
+            elif reply[0] == FAILED:
+                log(f"{flow.label} not credited: {one_line(reply[1])}")
             else:
-                log(f"{flow.label}: no clear verdict, counting as not credited: {one_line(text)}")
+                log(f"{flow.label}: no clear verdict, counting as not credited: {one_line(reply[1])}")
+            # Advance to the next card. If the site already moved on by itself
+            # (its retries ran out and it re-showed the "Like Video" stage for
+            # the next video), do NOT click Skip -- that would skip the fresh
+            # card. Reload to get a clean card list; otherwise click the site's
+            # Skip in-place, falling back to a reload.
+            already_advanced = False
+            if flow.advanced is not None:
+                try:
+                    already_advanced = bool(flow.advanced(driver))
+                except WebDriverException:
+                    already_advanced = False
+            if already_advanced or not _skip_card(driver, flow, is_stopped):
+                _reload(driver, flow)
             random_delay(2, 5, is_stopped)
-            _reload(driver, flow)
         except WebDriverException as e:
             log(f"Error on {flow.label.lower()}: {e.__class__.__name__}")
             close_extra_windows(driver, keep=main_window)
             _reload(driver, flow)
     return done
+
+
+def _await_verdict(driver, flow, guard, main_window, before, is_stopped):
+    """Poll the result box until the site gives a verdict, or VERIFY_WAIT passes.
+
+    Returns (CREDITED|FAILED|UNKNOWN, text) or None on timeout/stop. The page
+    re-checks by itself a few times ("Checking again...") before the final
+    verdict; PENDING text keeps the wait alive, unknown wording settles as
+    final once it stops changing. Ads are pruned on every poll.
+    """
+    seen = {"text": "", "since": None, "last": ""}
+
+    def _poll():
+        guard.prune()
+        driver.switch_to.window(main_window)
+        text, html = _result(driver, flow)
+        # A "verify again" button in view is itself the verdict: the check
+        # failed and the site is offering a manual retry. This must win over
+        # the reply text, because YouTube's failure reads "We couldn't verify
+        # your Like just yet" -- the same "just yet" the SoundCloud auto-recheck
+        # uses, which would otherwise be read as PENDING forever.
+        if flow.verify_again is not None:
+            try:
+                if flow.verify_again(driver):
+                    return FAILED, (text or "We couldn't verify your Like yet.")
+            except WebDriverException:
+                pass
+        # The site moved on to the next card by itself (no retry button, the
+        # "Like Video" stage is back): a terminal "not credited", so stop
+        # waiting instead of polling the result box for VERIFY_WAIT.
+        if flow.advanced is not None and classify(text, html) != PENDING:
+            try:
+                if flow.advanced(driver):
+                    return FAILED, (text or "The site moved on without crediting the Like.")
+            except WebDriverException:
+                pass
+        if not text or text == before:
+            return None
+        seen["last"] = text
+        verdict = classify(text, html)
+        if verdict in (CREDITED, FAILED):
+            return verdict, text
+        if verdict == PENDING:
+            seen["text"] = ""
+            return None
+        now = time.monotonic()      # unknown wording: final once it stops changing
+        if text != seen["text"]:
+            seen["text"], seen["since"] = text, now
+        elif now - seen["since"] >= SETTLE_WAIT:
+            return UNKNOWN, text
+        return None
+
+    return wait_until(_poll, timeout=VERIFY_WAIT, is_stopped=is_stopped, step=0.5)
+
+
+def _skip_card(driver, flow, is_stopped):
+    """Click the site's Skip control to advance the card in-place. Returns True if clicked."""
+    if not flow.skip:
+        return False
+    try:
+        skip = flow.skip(driver)
+    except WebDriverException:
+        return False
+    if not skip:
+        return False
+    try:
+        skip.click()
+    except WebDriverException:
+        return False
+    wait_unless_stopped(2, is_stopped)   # let the site swap in the next card
+    return True
 
 
 def _reload(driver, flow):

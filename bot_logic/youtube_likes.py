@@ -25,7 +25,7 @@ from .utils import (
     wait_unless_stopped, wait_until, wait_for_manual_captcha, run_cli_task,
 )
 from .engage import (
-    Flow, process_engage_cards_once, first_displayed, settle_action,
+    Flow, process_engage_cards_once, first_displayed, displayed_with_text, settle_action,
     DONE, NOT_SIGNED_IN, NOT_FOUND,
 )
 
@@ -37,6 +37,15 @@ CONFIRM_BUTTON = "#ylhManualBtn"         # "I'm done, check now"
 RESULT_BOX = "#FBPoints"
 LIST_BOX = "#listall"
 CAPTCHA_SELECTOR = "img[src*='captcha']"
+# After a failed check the page shows (verified live 2026-09-22): a
+# <button> "Verify My Like Again" + "N more attempt available" + a
+# <a> "[Skip this Video]". Neither carries a distinctive id, so match the
+# button by YLH's stable English label inside the result area, and the skip
+# link by its text (with a broad container fallback). The site is not
+# localised, so matching these YLH labels by text is safe.
+VERIFY_AGAIN_TEXT = "verify my like again"
+SKIP_TEXT = "skip this video"
+RESULT_AREA = "#FBPoints button, #FBBox button, #FBPoints a, #FBBox a"
 VIDEO_ID_RE = re.compile(r"viewvideo\(\d+\s*,\s*'([^']+)'")
 # youtube.com
 LIKE_BUTTON = ("like-button-view-model button, #segmented-like-button button, "
@@ -99,10 +108,40 @@ def _act(driver, log, is_stopped):
     return outcome
 
 
+def _verify_again(driver):
+    """The site's "Verify My Like Again" button after a failed check, or None."""
+    return displayed_with_text(driver, RESULT_AREA, VERIFY_AGAIN_TEXT)
+
+
+def _skip(driver):
+    """The site's Skip control (advances the card in-place), or None.
+
+    Prefers the failed-check "[Skip this Video]" link, then the second-stage
+    "Skip" (#DoesLike a). Both are on the YLH page in English.
+    """
+    return (displayed_with_text(driver, RESULT_AREA, SKIP_TEXT)
+            or first_displayed(driver, "#DoesLike a"))
+
+
+def _advanced(driver):
+    """True once the site has moved on to the next video by itself.
+
+    After the "Verify My Like Again" attempts run out, YouLikeHits drops the
+    retry button, shows "We still couldn't verify your Like... try another
+    one", and re-renders the first "Like Video" stage for the next video
+    (verified live 2026-09-22). That stage-2 button being displayed again --
+    with no "Verify My Like Again" in view -- is the "site moved on" signal.
+    """
+    if displayed_with_text(driver, RESULT_AREA, VERIFY_AGAIN_TEXT):
+        return False
+    return first_displayed(driver, STAGE2_BUTTON) is not None
+
+
 FLOW = Flow(
     label="Liking", target="YouTube", page=PAGE, cards=CARDS,
     confirm=CONFIRM_BUTTON, result_box=RESULT_BOX, list_box=LIST_BOX,
     open_popup=_open_popup, act=_act, describe=_describe,
+    verify_again=_verify_again, skip=_skip, advanced=_advanced,
 )
 
 
