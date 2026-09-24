@@ -2,7 +2,10 @@
 live flow read on 2026-09-21 (see the module docstrings). Time is virtual."""
 import unittest
 
-from bot_logic import youtube_likes, soundcloud_follows, engage, master, settings
+from bot_logic import (
+    youtube_likes, soundcloud_follows, engage, master, settings,
+    twitter_follows, instagram_follows, twitter_likes, instagram_likes,
+)
 from tests.fakes import FakeDriver, FakeElement, logged_in
 from tests.test_tasks import _no_sleep, _FakeClock, _stop_after
 from unittest import mock
@@ -559,6 +562,508 @@ class SoundCloudFollowsTests(unittest.TestCase):
         self.assertFalse(any("site may have changed" in m or "not logged in" in m.lower() for m in logs), logs)
 
 
+class FakeExternalFollowSite:
+    """A `#getpoints` follow page (twitter2.php / instagram.php) whose popup
+    lands on the external profile. `state` drives the profile button: a
+    stateful fake mirroring the live flow read 2026-09-24.
+
+    `mode` picks the site's markup:
+      - "x": follow button is `button[data-testid='<id>-follow']`, becomes
+        `-unfollow`; signed in shows the account-switcher.
+      - "ig": header button carries a class that gains 'following'; signed in
+        shows the home nav.
+    `blocked_url` (e.g. an x.com login flow or instagram suspended page) makes
+    the popup land on a gate so the act must return NOT_SIGNED_IN.
+    """
+
+    def __init__(self, driver, module, mode, users=("alice",), reply="You earned 21 points!",
+                 blocked_url=None, follow_works=True, already_following=False, revert=False,
+                 sensitive=False):
+        self.d = driver
+        self.module, self.mode = module, mode
+        self.users, self.remaining = list(users), list(users)
+        self.reply, self.blocked_url = reply, blocked_url
+        self.follow_works, self.already_following, self.revert = follow_works, already_following, revert
+        self.sensitive = sensitive
+        self.follow_buttons, self.confirm_clicks, self.skip_clicks = [], 0, 0
+        self.gate_clicks = 0
+        driver.on_get = lambda url: self.reset()
+        self.reset()
+
+    def reset(self):
+        d = self.d
+        d.elements = {**logged_in(), "#txtHint": [FakeElement("", displayed=False)]}
+        d.elements["#getpoints .earn-card"] = [self._card(u) for u in self.remaining]
+        d.elements["#getpoints"] = [FakeElement("Start Following" if self.remaining
+                                                else "No more tasks at this time.\nCheck back later for more.")]
+        d.elements["#getpoints a.earn-confirm"] = []
+        d.elements["#getpoints a[onclick*='skipuser']"] = [
+            FakeElement("Skip", attrs={"onclick": f"skipuser('{u}','x');remove('{u}');"},
+                        on_click=lambda u=u: self._skip(u)) for u in self.remaining]
+
+    def _skip(self, user):
+        self.skip_clicks += 1
+        if user in self.remaining:
+            self.remaining.remove(user)
+
+    def _card(self, user):
+        confirm = FakeElement("I followed", displayed=False, attrs={"class": "earn-btn earn-confirm"},
+                              on_click=lambda: self._verify(user))
+        follow = FakeElement("Follow", attrs={"class": "earn-btn"},
+                             on_click=lambda: self._open_popup(user, confirm))
+        return FakeElement(f"@{user}\n+21 points", attrs={"id": f"follow_{user}"},
+                           children={"a.earn-btn": [follow, confirm], ".who": [FakeElement(f"@{user}")]})
+
+    def _x_button(self):
+        followed = " -unfollow" if self.already_following else ""
+        tid = f"9988{'-unfollow' if self.already_following else '-follow'}"
+        if self.revert:
+            b = _Reverting("Seguir", "data-testid", "9988-follow", "9988-unfollow")
+        else:
+            b = FakeElement("Seguir", attrs={"data-testid": tid})
+            b._on_click = lambda: b.attrs.__setitem__("data-testid", "9988-unfollow") if self.follow_works else None
+        return b, ("button[data-testid$='-follow']" if not self.already_following
+                   else "button[data-testid$='-unfollow']")
+
+    def _ig_button(self):
+        # The real code reads the button's child svg[aria-label]: the "Seguindo"
+        # state carries a down-chevron svg, "Seguir" has none. Model that.
+        arrow = [FakeElement(attrs={"aria-label": "Ícone de seta para baixo"})]
+
+        def set_following():
+            if self.follow_works:
+                b.children["svg[aria-label]"] = arrow
+        b = FakeElement("Seguir", attrs={"type": "button"},
+                        children={"svg[aria-label]": (arrow if self.already_following else [])})
+        b._on_click = set_following
+        return b
+
+    def _open_popup(self, user, confirm):
+        d = self.d
+        if self.blocked_url:
+            d.open_window("popup", elements={}, url=self.blocked_url)
+        elif self.mode == "x":
+            button, sel = self._x_button()
+            self.follow_buttons.append(button)
+            page = {sel: [button], "button[data-testid$='-follow']": [button],
+                    "button[data-testid$='-unfollow']": ([button] if self.already_following else [])}
+            page["[data-testid='SideNav_AccountSwitcher_Button']"] = [FakeElement()]
+            if self.sensitive:
+                # The header (and its follow button) is hidden until the
+                # "Yes, view profile" gate is dismissed.
+                gate_sel = "[data-testid='emptyState'] [data-testid='empty_state_button_text']"
+                hidden = dict(page)
+                page = {gate_sel: [FakeElement("Yes, view profile",
+                                               on_click=lambda h=hidden: self._reveal(h))],
+                        "[data-testid='SideNav_AccountSwitcher_Button']": [FakeElement()]}
+                self._pending_reveal = (gate_sel, hidden)
+            d.open_window("popup", elements=page, url=f"https://x.com/{user}")
+        else:   # ig
+            button = self._ig_button()
+            self.follow_buttons.append(button)
+            # A bio-link button (svg "Ícone de link") comes first in the header
+            # DOM order; the real code must skip it and pick the follow button.
+            bio_link = FakeElement("bio link", attrs={"type": "button"},
+                                   children={"svg[aria-label]": [FakeElement(attrs={"aria-label": "Ícone de link"})]})
+            page = {"header button[type='button']": [bio_link, button],
+                    "nav a[href='/']": [FakeElement()]}
+            d.open_window("popup", elements=page, url=f"https://www.instagram.com/{user}/")
+        confirm._displayed = True
+        d.elements["#getpoints a.earn-confirm"] = [confirm]
+
+    def _reveal(self, hidden):
+        """Dismiss the sensitive gate: swap the popup page for the real header."""
+        self.gate_clicks += 1
+        gate_sel = "[data-testid='emptyState'] [data-testid='empty_state_button_text']"
+        page = dict(hidden)
+        page[gate_sel] = []   # gate gone
+        self.d.pages["popup"]["elements"] = page
+
+    def _verify(self, user):
+        self.confirm_clicks += 1
+        if engage.CREDITED_RE.search(self.reply) and user in self.remaining:
+            self.remaining.remove(user)
+        self.d.elements["#txtHint"] = [_Replies([f"Verifying @{user}...", self.reply])]
+
+
+class FakeExternalLikeSite:
+    """favtweets.php: a `#listall` like page whose popup lands on a tweet on
+    x.com. Stateful; mirrors the live flow read 2026-09-24."""
+
+    def __init__(self, driver, tweets=("t1",), reply="You earned 21 points!",
+                 blocked_url=None, like_works=True, already_liked=False, popup_opens=True, revert=False):
+        self.d = driver
+        self.remaining = list(tweets)
+        self.reply, self.blocked_url = reply, blocked_url
+        self.like_works, self.already_liked = like_works, already_liked
+        self.popup_opens, self.revert = popup_opens, revert
+        self.like_buttons, self.confirm_clicks, self.skip_clicks = [], 0, 0
+        driver.on_get = lambda url: self.reset()
+        self.reset()
+
+    def reset(self):
+        d = self.d
+        d.elements = {**logged_in(), "#txtHint": [FakeElement("", displayed=False)]}
+        d.elements["#listall .earn-card"] = [self._card(t) for t in self.remaining]
+        d.elements["#listall"] = [FakeElement("Start Liking" if self.remaining
+                                              else "No more tasks at this time. Check back later for more.")]
+        d.elements["#listall a.earn-confirm"] = []
+        d.elements["#listall a[onclick*='favSkip']"] = [
+            FakeElement("Skip", attrs={"onclick": f"favSkip('{t}');"}, on_click=lambda: self._skip(t))
+            for t in self.remaining]
+
+    def _card(self, tweet):
+        confirm = FakeElement("I Liked", displayed=False, attrs={"class": "earn-btn earn-confirm"},
+                              on_click=lambda: self._verify(tweet))
+        like = FakeElement("Like", attrs={"class": "earn-btn"},
+                           on_click=lambda: self._open_popup(tweet, confirm))
+        return FakeElement("+21 points\nLike", attrs={"id": f"card_{tweet}"},
+                           children={"a.earn-btn": [like, confirm]})
+
+    def _open_popup(self, tweet, confirm):
+        d = self.d
+        if not self.popup_opens:
+            return
+        if self.blocked_url:
+            d.open_window("popup", elements={}, url=self.blocked_url)
+        else:
+            if self.revert:
+                like = _Reverting("", "data-testid", "like", "unlike")
+                page = {"button[data-testid='like']": [like], "button[data-testid='unlike']": []}
+            elif self.already_liked:
+                like = FakeElement(attrs={"data-testid": "unlike"})
+                page = {"button[data-testid='unlike']": [like], "button[data-testid='like']": []}
+            else:
+                like = FakeElement(attrs={"data-testid": "like"})
+                page = {"button[data-testid='like']": [like], "button[data-testid='unlike']": []}
+                like._on_click = lambda: (page.__setitem__("button[data-testid='unlike']", [like]),
+                                          page.__setitem__("button[data-testid='like']", [])) if self.like_works else None
+            self.like_buttons.append(like)
+            page["[data-testid='SideNav_AccountSwitcher_Button']"] = [FakeElement()]
+            d.open_window("popup", elements=page, url=f"https://x.com/user/status/{tweet}")
+        confirm._displayed = True
+        d.elements["#listall a.earn-confirm"] = [confirm]
+
+    def _skip(self, tweet):
+        self.skip_clicks += 1
+        if tweet in self.remaining:
+            self.remaining.remove(tweet)
+
+    def _verify(self, tweet):
+        self.confirm_clicks += 1
+        if engage.CREDITED_RE.search(self.reply) and tweet in self.remaining:
+            self.remaining.remove(tweet)
+        self.d.elements["#txtHint"] = [_Replies(["Verifying...", self.reply])]
+
+
+class FakeIGLikeSite:
+    """instagramlikes.php: one post at a time, popup lands on instagram.com/p/.
+    Result box is `#FBPoints` and the container is `#FBLike`. Stateful."""
+
+    def __init__(self, driver, posts=("p1",), reply="You earned 14 points!",
+                 blocked_url=None, like_works=True, already_liked=False):
+        self.d = driver
+        self.remaining = list(posts)
+        self.reply, self.blocked_url = reply, blocked_url
+        self.like_works, self.already_liked = like_works, already_liked
+        self.like_icons, self.confirm_clicks = [], 0
+        driver.on_get = lambda url: self.reset()
+        self.reset()
+
+    def reset(self):
+        d = self.d
+        d.elements = {**logged_in(), "#FBPoints": [FakeElement("", displayed=False)]}
+        post = self.remaining[0] if self.remaining else None
+        if post:
+            confirm = FakeElement("I liked this", displayed=False, attrs={"class": "earn-btn earn-confirm"},
+                                  on_click=lambda: self._verify(post))
+            like = FakeElement("Like on Instagram", attrs={"id": "iglikebtn", "class": "earn-btn"},
+                               on_click=lambda: self._open_popup(post, confirm))
+            d.elements[".iglike-wrap .earn-card"] = [FakeElement(f"instagram.com/p/{post}\n+14 points")]
+            d.elements["a#iglikebtn.earn-btn"] = [like]
+            d.elements[".iglike-wrap a.earn-confirm"] = []
+            self._confirm = confirm
+            d.elements["#FBLike"] = [FakeElement("Start Liking")]
+            d.elements["#DoesLike a[onclick*='FBSkip']"] = [
+                FakeElement("Skip", attrs={"onclick": f"FBSkip('{post}');"}, on_click=lambda: self._skip(post))]
+        else:
+            d.elements[".iglike-wrap .earn-card"] = []
+            d.elements["#FBLike"] = [FakeElement("No more tasks at this time. Check back later for more.")]
+
+    def _open_popup(self, post, confirm):
+        d = self.d
+        if self.blocked_url:
+            d.open_window("popup", elements={}, url=self.blocked_url)
+        else:
+            label = "Descurtir" if self.already_liked else "Curtir"
+            # The POST like svg has height 24; a comment like (height 16, same
+            # label) must be ignored by the real code.
+            icon = FakeElement(attrs={"aria-label": label, "height": "24"})
+            icon._on_click = lambda: icon.attrs.__setitem__("aria-label", "Descurtir") if self.like_works else None
+            comment_like = FakeElement(attrs={"aria-label": "Curtir", "height": "16"})
+            self.like_icons.append(icon)
+            page = {"svg[aria-label]": [comment_like, icon],
+                    "nav a[href='/']": [FakeElement()]}
+            d.open_window("popup", elements=page, url=f"https://www.instagram.com/p/{post}/")
+        confirm._displayed = True
+        d.elements[".iglike-wrap a.earn-confirm"] = [confirm]
+
+    def _skip(self, post):
+        if post in self.remaining:
+            self.remaining.remove(post)
+
+    def _verify(self, post):
+        self.confirm_clicks += 1
+        if engage.CREDITED_RE.search(self.reply) and post in self.remaining:
+            self.remaining.remove(post)
+        self.d.elements["#FBPoints"] = [_Replies(["Hang tight, checking with Instagram...", self.reply])]
+
+
+class TwitterFollowsTests(unittest.TestCase):
+    def test_follow_is_performed_confirmed_and_credited(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalFollowSite(d, twitter_follows, "x")
+        logs = []
+        with _no_sleep():
+            n = twitter_follows.process_twitter_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 1)
+        self.assertEqual(site.confirm_clicks, 1)
+        self.assertEqual(d.window_handles, ["main"])
+        self.assertTrue(any("credited: You earned 21 points" in m for m in logs), logs)
+
+    def test_already_following_confirms_without_clicking(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalFollowSite(d, twitter_follows, "x", already_following=True)
+        with _no_sleep():
+            twitter_follows.process_twitter_follows_once(d, lambda m: None, lambda: False)
+        self.assertEqual(site.follow_buttons[0].clicks, 0)
+        self.assertEqual(site.confirm_clicks, 1)
+
+    def test_login_gate_ends_the_pass_with_a_hint(self):
+        d = FakeDriver(elements=logged_in())
+        FakeExternalFollowSite(d, twitter_follows, "x", blocked_url="https://x.com/i/flow/login")
+        logs = []
+        with _no_sleep():
+            n = twitter_follows.process_twitter_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertTrue(any("sign in" in m.lower() and ("X" in m) for m in logs), logs)
+        self.assertEqual(d.window_handles, ["main"])
+
+    def test_reverted_follow_is_not_confirmed(self):
+        d = FakeDriver(elements=logged_in())
+        FakeExternalFollowSite(d, twitter_follows, "x", revert=True)
+        logs = []
+        with _no_sleep():
+            n = twitter_follows.process_twitter_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertTrue(any("reverted the follow" in m for m in logs), logs)
+
+    def test_empty_notice_is_not_a_missing_card(self):
+        d = FakeDriver(elements=logged_in())
+        FakeExternalFollowSite(d, twitter_follows, "x", users=())
+        logs = []; clock = _FakeClock()
+        with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
+            n = twitter_follows.process_twitter_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertFalse(any("may have changed" in m for m in logs), logs)
+
+    def test_does_not_reload_the_page_between_cards(self):
+        # Live 2026-09-24: the follow page slides its own list via AJAX; a
+        # reload after each card makes the whole list "jump back one". The flow
+        # sets reload_between_cards=False so the page is never re-fetched
+        # mid-pass -- only the initial navigate stays.
+        self.assertFalse(twitter_follows.FLOW.reload_between_cards)
+        d = FakeDriver(elements=logged_in())
+        FakeExternalFollowSite(d, twitter_follows, "x", users=("a", "b"))
+        with _no_sleep():
+            twitter_follows.process_twitter_follows_once(d, lambda m: None, lambda: False)
+        self.assertEqual(d.visited.count(f"{utils.YLH_BASE}/{twitter_follows.PAGE}"), 0)
+
+    def test_already_followed_reply_skips_instead_of_reloading(self):
+        # Live 2026-09-24: the site re-shows a profile we already follow; the
+        # confirm returns "Uh oh ... Please tap the Follow link first...". Only
+        # Skip clears it (a reload re-queues it).
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalFollowSite(
+            d, twitter_follows, "x", users=("a",), already_following=True,
+            reply="Uh oh Please tap the Follow link first, then come back and confirm.")
+        logs = []
+        with _no_sleep():
+            twitter_follows.process_twitter_follows_once(d, logs.append, lambda: False)
+        self.assertGreaterEqual(site.skip_clicks, 1)
+        self.assertEqual(d.visited.count(f"{utils.YLH_BASE}/{twitter_follows.PAGE}"), 0)   # not reloaded
+        self.assertTrue(any("already done" in m.lower() or "skipping this one" in m for m in logs), logs)
+
+    def test_sensitive_content_gate_is_dismissed_then_follow_proceeds(self):
+        # Live 2026-09-24: some profiles hide the header behind a "Caution:
+        # potentially sensitive content" interstitial with "Yes, view profile".
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalFollowSite(d, twitter_follows, "x", sensitive=True)
+        logs = []
+        with _no_sleep():
+            n = twitter_follows.process_twitter_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(site.gate_clicks, 1)
+        self.assertEqual(n, 1)
+        self.assertTrue(any("sensitive-content" in m for m in logs), logs)
+
+
+class InstagramFollowsTests(unittest.TestCase):
+    def test_follow_is_performed_confirmed_and_credited(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalFollowSite(d, instagram_follows, "ig")
+        logs = []
+        with _no_sleep():
+            n = instagram_follows.process_instagram_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 1)
+        self.assertEqual(site.confirm_clicks, 1)
+        self.assertTrue(any("credited: You earned 21 points" in m for m in logs), logs)
+
+    def test_suspended_account_ends_the_pass_with_a_hint(self):
+        # The live case 2026-09-24: instagramrender lands on /accounts/suspended.
+        d = FakeDriver(elements=logged_in())
+        FakeExternalFollowSite(d, instagram_follows, "ig",
+                               blocked_url="https://www.instagram.com/accounts/suspended/?next=/")
+        logs = []
+        with _no_sleep():
+            n = instagram_follows.process_instagram_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertTrue(any("sign in" in m.lower() and "Instagram" in m for m in logs), logs)
+        self.assertEqual(d.window_handles, ["main"])
+
+    def test_challenge_page_is_also_treated_as_blocked(self):
+        d = FakeDriver(elements=logged_in())
+        FakeExternalFollowSite(d, instagram_follows, "ig",
+                               blocked_url="https://www.instagram.com/challenge/?next=/")
+        logs = []
+        with _no_sleep():
+            n = instagram_follows.process_instagram_follows_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertTrue(any("sign in" in m.lower() for m in logs), logs)
+
+    def test_picks_the_follow_button_not_the_bio_link(self):
+        # Live 2026-09-24 bug: with a link-rich bio the header holds a bio-link
+        # button (svg "Ícone de link") before the Follow button; the bot must
+        # skip it and click the real Follow (credit proves the right click).
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalFollowSite(d, instagram_follows, "ig")
+        with _no_sleep():
+            n = instagram_follows.process_instagram_follows_once(d, lambda m: None, lambda: False)
+        self.assertEqual(n, 1)
+        self.assertEqual(site.follow_buttons[0].clicks, 1)   # the follow button, not the bio link
+
+    def test_already_following_on_open_detected_by_arrow_svg(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalFollowSite(d, instagram_follows, "ig", already_following=True)
+        with _no_sleep():
+            instagram_follows.process_instagram_follows_once(d, lambda m: None, lambda: False)
+        self.assertEqual(site.follow_buttons[0].clicks, 0)   # not clicked; already following
+        self.assertEqual(site.confirm_clicks, 1)
+
+
+class TwitterLikesTests(unittest.TestCase):
+    def test_like_is_performed_confirmed_and_credited(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalLikeSite(d)
+        logs = []
+        with _no_sleep():
+            n = twitter_likes.process_twitter_likes_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 1)
+        self.assertEqual(site.confirm_clicks, 1)
+        self.assertEqual(d.window_handles, ["main"])
+        self.assertTrue(any("credited: You earned 21 points" in m for m in logs), logs)
+
+    def test_already_liked_confirms_without_clicking(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalLikeSite(d, already_liked=True)
+        with _no_sleep():
+            twitter_likes.process_twitter_likes_once(d, lambda m: None, lambda: False)
+        self.assertEqual(site.like_buttons[0].clicks, 0)
+        self.assertEqual(site.confirm_clicks, 1)
+
+    def test_login_gate_ends_the_pass_with_a_hint(self):
+        d = FakeDriver(elements=logged_in())
+        FakeExternalLikeSite(d, blocked_url="https://x.com/login")
+        logs = []
+        with _no_sleep():
+            n = twitter_likes.process_twitter_likes_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertTrue(any("sign in" in m.lower() for m in logs), logs)
+
+    def test_uncredited_like_skips_the_card_in_place(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeExternalLikeSite(d, tweets=("a",), reply="We could not verify your like. Try again.")
+        logs = []
+        with _no_sleep():
+            twitter_likes.process_twitter_likes_once(d, logs.append, lambda: False)
+        self.assertGreaterEqual(site.skip_clicks, 1)      # advanced in-place with favSkip
+        self.assertTrue(any("not credited" in m for m in logs), logs)
+
+    def test_empty_notice_is_not_a_missing_card(self):
+        d = FakeDriver(elements=logged_in())
+        FakeExternalLikeSite(d, tweets=())
+        logs = []; clock = _FakeClock()
+        with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
+            n = twitter_likes.process_twitter_likes_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertFalse(any("may have changed" in m for m in logs), logs)
+
+
+class InstagramLikesTests(unittest.TestCase):
+    def test_like_is_performed_confirmed_and_credited(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeIGLikeSite(d)
+        logs = []
+        with _no_sleep():
+            n = instagram_likes.process_instagram_likes_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 1)
+        self.assertEqual(site.confirm_clicks, 1)
+        self.assertTrue(any("credited: You earned 14 points" in m for m in logs), logs)
+
+    def test_already_liked_confirms_without_clicking(self):
+        d = FakeDriver(elements=logged_in())
+        site = FakeIGLikeSite(d, already_liked=True)
+        with _no_sleep():
+            instagram_likes.process_instagram_likes_once(d, lambda m: None, lambda: False)
+        self.assertEqual(site.like_icons[0].clicks, 0)
+        self.assertEqual(site.confirm_clicks, 1)
+
+    def test_suspended_account_ends_the_pass_with_a_hint(self):
+        d = FakeDriver(elements=logged_in())
+        FakeIGLikeSite(d, blocked_url="https://www.instagram.com/accounts/suspended/?next=/")
+        logs = []
+        with _no_sleep():
+            n = instagram_likes.process_instagram_likes_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertTrue(any("sign in" in m.lower() and "Instagram" in m for m in logs), logs)
+        self.assertEqual(d.window_handles, ["main"])
+
+    def test_result_box_is_fbpoints_not_txthint(self):
+        # This page mirrors YouTube Likes' result box, unlike the follow pages.
+        self.assertEqual(instagram_likes.RESULT_BOX, "#FBPoints")
+        self.assertEqual(instagram_likes.FLOW.result_box, "#FBPoints")
+
+    def test_likes_the_post_not_a_comment(self):
+        # Live 2026-09-24 bug: the post is not in <article> and every comment
+        # has a "Curtir" like too; the post's like is the height-24 one. The
+        # fake serves a height-16 comment like first; liking must still credit.
+        d = FakeDriver(elements=logged_in())
+        site = FakeIGLikeSite(d)
+        logs = []
+        with _no_sleep():
+            n = instagram_likes.process_instagram_likes_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 1)
+        self.assertEqual(site.like_icons[0].clicks, 1)   # the post's like (height 24)
+
+    def test_empty_notice_is_not_a_missing_card(self):
+        d = FakeDriver(elements=logged_in())
+        FakeIGLikeSite(d, posts=())
+        logs = []; clock = _FakeClock()
+        with mock.patch.multiple(utils.time, sleep=clock.sleep, monotonic=clock.monotonic):
+            n = instagram_likes.process_instagram_likes_once(d, logs.append, lambda: False)
+        self.assertEqual(n, 0)
+        self.assertFalse(any("may have changed" in m for m in logs), logs)
+
+
 class SharedFlowTests(unittest.TestCase):
     def test_credited_detection(self):
         for text in ("You earned 21 points!", "21 Points Added!", "+21 points credited",
@@ -584,6 +1089,15 @@ class SharedFlowTests(unittest.TestCase):
         self.assertEqual(engage.classify(text), engage.CREDITED)
         self.assertEqual(engage.one_line(text), "You got 21 Points for liking OFF-DAY RIDE: Mandi Manda & Lepak Santai!")
 
+    def test_already_done_detection(self):
+        # These never credit; the loop must Skip, not reload (2026-09-24).
+        for text in ("Uh oh Please tap the Follow link first, then come back and confirm.",
+                     "You already follow this user.", "Already liked."):
+            self.assertTrue(engage.is_already_done(text), text)
+        for text in ("We couldn't confirm that follow yet. Try again.",
+                     "Success! You followed @a! You got 21 Points!"):
+            self.assertFalse(engage.is_already_done(text), text)
+
     def test_card_points(self):
         self.assertEqual(engage.card_points(FakeElement("Points: 21\nLike")), 21)
         self.assertEqual(engage.card_points(FakeElement("@alice\n+17 points")), 17)
@@ -596,11 +1110,22 @@ class SharedFlowTests(unittest.TestCase):
                     soundcloud_follows.CARDS, soundcloud_follows.FOLLOW_LINK, soundcloud_follows.CONFIRM_BUTTON,
                     soundcloud_follows.RESULT_BOX, soundcloud_follows.FOLLOW_BUTTON, soundcloud_follows.SIGNED_IN,
                     soundcloud_follows.HEADER_FOLLOW, soundcloud_follows.ANY_FOLLOW,
-                    soundcloud_follows.LOGIN_MENU):
+                    soundcloud_follows.LOGIN_MENU,
+                    twitter_follows.CARDS, twitter_follows.CONFIRM_BUTTON, twitter_follows.FOLLOW_BUTTON,
+                    twitter_follows.FOLLOWED_BUTTON, twitter_follows.SIGNED_IN, twitter_follows.LOGIN_GATE,
+                    instagram_follows.CARDS, instagram_follows.CONFIRM_BUTTON, instagram_follows.HEADER_BUTTONS,
+                    instagram_follows.SIGNED_IN, instagram_follows.SKIP_LINK,
+                    twitter_likes.CARDS, twitter_likes.CONFIRM_BUTTON, twitter_likes.SKIP_LINK,
+                    twitter_likes.LIKE_BUTTON, twitter_likes.LIKED_BUTTON, twitter_likes.SIGNED_IN,
+                    twitter_follows.SKIP_LINK, twitter_follows.SENSITIVE_GATE,
+                    instagram_likes.CARDS, instagram_likes.CONFIRM_BUTTON, instagram_likes.SKIP_LINK,
+                    instagram_likes.LIKE_ICON, instagram_likes.LIST_BOX, instagram_likes.RESULT_BOX):
             self.assertNotIn(":contains", sel)
 
     def test_task_loops_exit_when_not_logged_in(self):
-        for task in (youtube_likes._run_youtube_likes_task, soundcloud_follows._run_soundcloud_follows_task):
+        for task in (youtube_likes._run_youtube_likes_task, soundcloud_follows._run_soundcloud_follows_task,
+                     twitter_follows._run_twitter_follows_task, instagram_follows._run_instagram_follows_task,
+                     twitter_likes._run_twitter_likes_task, instagram_likes._run_instagram_likes_task):
             with self.subTest(task=task.__name__), _no_sleep():
                 logs = []
                 task(FakeDriver(body="Log in"), lambda: False, logs.append, lambda p: None)

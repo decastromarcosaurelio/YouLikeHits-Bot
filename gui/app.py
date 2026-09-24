@@ -25,6 +25,10 @@ LOOPS = [
     ("youtube_likes",      "YouTube Likes",      "👍"),
     ("soundcloud",         "SoundCloud Plays",   "🎵"),
     ("soundcloud_follows", "SoundCloud Follows", "👥"),
+    ("instagram",          "Instagram Followers", "📷"),
+    ("instagram_likes",    "Instagram Likes",    "❤"),
+    ("twitter",            "Twitter Followers",  "🐦"),
+    ("twitter_likes",      "Twitter Likes",      "💙"),
     ("bonus",              "Daily Bonus",        "🎁"),
     ("master",             "Master Loop",        "🔄"),
 ]
@@ -54,6 +58,14 @@ def _task_for(name):
         from bot_logic.soundcloud import _run_soundcloud_task as task
     elif name == "soundcloud_follows":
         from bot_logic.soundcloud_follows import _run_soundcloud_follows_task as task
+    elif name == "instagram":
+        from bot_logic.instagram_follows import _run_instagram_follows_task as task
+    elif name == "instagram_likes":
+        from bot_logic.instagram_likes import _run_instagram_likes_task as task
+    elif name == "twitter":
+        from bot_logic.twitter_follows import _run_twitter_follows_task as task
+    elif name == "twitter_likes":
+        from bot_logic.twitter_likes import _run_twitter_likes_task as task
     elif name == "bonus":
         from bot_logic.bonus import _run_bonus_task as task
     elif name == "master":

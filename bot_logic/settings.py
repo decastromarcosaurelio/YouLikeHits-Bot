@@ -19,6 +19,10 @@ TASKS = (
     ("youtube_likes", "YouTube Likes"),
     ("soundcloud", "SoundCloud Plays"),
     ("soundcloud_follows", "SoundCloud Follows"),
+    ("instagram", "Instagram Followers"),
+    ("instagram_likes", "Instagram Likes"),
+    ("twitter", "Twitter Followers"),
+    ("twitter_likes", "Twitter Likes"),
 )
 TASK_KEYS = tuple(key for key, _ in TASKS)
 TASK_LABELS = dict(TASKS)
@@ -31,6 +35,10 @@ DEFAULTS = {
     "youtube_likes_per_cycle": 2,
     "soundcloud_per_cycle": 2,
     "soundcloud_follows_per_cycle": 2,
+    "instagram_per_cycle": 2,
+    "instagram_likes_per_cycle": 2,
+    "twitter_per_cycle": 2,
+    "twitter_likes_per_cycle": 2,
     "master_tasks": list(TASK_KEYS),  # tasks the master loop runs (subset of TASK_KEYS)
 }
 QUOTA_KEYS = tuple(key for key in DEFAULTS if key.endswith("_per_cycle"))

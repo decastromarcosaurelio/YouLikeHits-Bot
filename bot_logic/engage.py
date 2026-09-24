@@ -62,6 +62,15 @@ PENDING_RE = re.compile(r"hang tight|checking (with|again)|confirming|verifying|
                         r"please wait|one moment|\b\d+\s?s\b", re.I)
 FAILED_RE = re.compile(r"could ?n.t (confirm|verify)|not (be )?(confirmed|verified)|unable to|"
                        r"no longer|already|try again|failed|error|invalid|expired|skipped", re.I)
+# A FAILED reply that will NEVER credit no matter how often it is retried,
+# because the action is already done / the site wants the Follow link tapped
+# again for a profile we already follow (Instagram/Twitter followers, seen
+# live 2026-09-24: "Uh oh ... Please tap the Follow link first, then come back
+# and confirm."). Reloading re-queues the profile; the only way out is to
+# Skip it so the site drops it from the list. Distinct from a genuine failure
+# (rate limit, revert) which we do NOT skip, to keep the slot for a retry.
+ALREADY_RE = re.compile(r"tap the follow|already follow|already like|already done|"
+                        r"follow link first", re.I)
 # What the site says when nothing is left (SoundCloud, seen live: "No more
 # tasks at this time. Check back later for more.").
 NO_ITEMS_RE = re.compile(r"no more|check back later|nothing (to|left)|no (videos|users|profiles|tasks)\b", re.I)
@@ -99,6 +108,16 @@ class Flow:
     # a terminal "not credited" signal, so the bot stops waiting for a verdict
     # that will never come and advances instead of hanging for VERIFY_WAIT.
     advanced: Callable = None
+    # Whether to reload the YLH page after each card. True (default) suits
+    # pages that only refresh their list on a full reload (YouTube Likes,
+    # SoundCloud). The Instagram/Twitter follow pages slide the list by
+    # themselves via AJAX -- they remove the finished card and shift the rest
+    # up, bringing a new one in at the bottom (seen live 2026-09-24). Reloading
+    # those fights that: the user sees the whole list "jump back one" and cards
+    # get reshuffled. Set False so the loop just re-reads the DOM the site
+    # already updated; `tried` (keyed by the stable `follow<id>`) still avoids
+    # re-touching a card within the pass.
+    reload_between_cards: bool = True
 
 
 def _first(driver, selector):
@@ -191,6 +210,15 @@ def classify(text, html=""):
     return UNKNOWN
 
 
+def is_already_done(text):
+    """True when the reply means 'already done / tap Follow first' (never credits).
+
+    Such a card must be Skipped so the site drops it, not reloaded (a reload
+    re-queues it). See ALREADY_RE.
+    """
+    return bool(ALREADY_RE.search(text or ""))
+
+
 def process_engage_cards_once(driver, log, is_stopped, flow, limit=None):
     """Work through the cards until none are left, `limit` is hit, or stopped.
 
@@ -231,7 +259,7 @@ def process_engage_cards_once(driver, log, is_stopped, flow, limit=None):
             guard = WindowGuard(driver, main_window)
             if not flow.open_popup(driver, card, is_stopped):
                 log(f"{flow.label}: could not open this card; skipping it.")
-                _reload(driver, flow)
+                _advance_page(driver, flow)
                 continue
 
             def _popup():
@@ -242,7 +270,7 @@ def process_engage_cards_once(driver, log, is_stopped, flow, limit=None):
                 if is_stopped():
                     break
                 log(f"{flow.label}: the {flow.target} window did not open; skipping this card.")
-                _reload(driver, flow)
+                _advance_page(driver, flow)
                 continue
 
             driver.switch_to.window(popup)
@@ -254,7 +282,7 @@ def process_engage_cards_once(driver, log, is_stopped, flow, limit=None):
                 break
             if outcome != DONE:
                 log(f"{flow.label}: the {flow.target} page did not react; skipping this card.")
-                _reload(driver, flow)
+                _advance_page(driver, flow)
                 continue
 
             confirm = wait_until(lambda: first_displayed(driver, flow.confirm),
@@ -263,7 +291,7 @@ def process_engage_cards_once(driver, log, is_stopped, flow, limit=None):
                 if is_stopped():
                     break
                 log(f"{flow.label}: no '{flow.confirm}' to confirm with; the site may have changed.")
-                _reload(driver, flow)
+                _advance_page(driver, flow)
                 continue
             before, _ = _result(driver, flow)
             confirm.click()
@@ -296,31 +324,40 @@ def process_engage_cards_once(driver, log, is_stopped, flow, limit=None):
                 done += 1
                 log(f"{flow.label} credited: {one_line(reply[1])}")
                 random_delay(2, 5, is_stopped)
-                _reload(driver, flow)
+                _advance_page(driver, flow)
                 continue
 
             # Not credited (failed, unknown, or no verdict at all). Advance the
             # card: click the site's Skip if the flow has one (it changes the
             # item in-place; reloading can bring the same one back and stall).
+            reply_text = reply[1] if reply is not None else ""
+            must_skip = is_already_done(reply_text)   # never credits; only Skip clears it
             if reply is None:
                 log(f"{flow.label}: no verdict after the checks; moving on.")
+            elif must_skip:
+                log(f"{flow.label}: already done / site wants the link tapped again "
+                    f"({one_line(reply_text)}); skipping this one.")
             elif reply[0] == FAILED:
-                log(f"{flow.label} not credited: {one_line(reply[1])}")
+                log(f"{flow.label} not credited: {one_line(reply_text)}")
             else:
-                log(f"{flow.label}: no clear verdict, counting as not credited: {one_line(reply[1])}")
+                log(f"{flow.label}: no clear verdict, counting as not credited: {one_line(reply_text)}")
             # Advance to the next card. If the site already moved on by itself
             # (its retries ran out and it re-showed the "Like Video" stage for
             # the next video), do NOT click Skip -- that would skip the fresh
-            # card. Reload to get a clean card list; otherwise click the site's
-            # Skip in-place, falling back to a reload.
+            # card. For an "already done" reply Skip is mandatory (a reload just
+            # re-queues the profile). Otherwise click the site's Skip in-place,
+            # falling back to advancing the page.
             already_advanced = False
             if flow.advanced is not None:
                 try:
                     already_advanced = bool(flow.advanced(driver))
                 except WebDriverException:
                     already_advanced = False
-            if already_advanced or not _skip_card(driver, flow, is_stopped):
-                _reload(driver, flow)
+            skipped = False if already_advanced else _skip_card(driver, flow, is_stopped)
+            if not skipped and not already_advanced:
+                # Could not Skip. For "already done" a reload at least clears
+                # the confirm error; for the rest, advance per the flow's rule.
+                _reload(driver, flow) if must_skip else _advance_page(driver, flow)
             random_delay(2, 5, is_stopped)
         except WebDriverException as e:
             log(f"Error on {flow.label.lower()}: {e.__class__.__name__}")
@@ -402,3 +439,11 @@ def _skip_card(driver, flow, is_stopped):
 
 def _reload(driver, flow):
     navigate_to(driver, flow.page, settle=3)
+
+
+def _advance_page(driver, flow):
+    """Move to a fresh card list. Reload the page unless the site slides its
+    own list (see Flow.reload_between_cards), in which case the loop re-reads
+    the DOM the site already updated."""
+    if flow.reload_between_cards:
+        _reload(driver, flow)

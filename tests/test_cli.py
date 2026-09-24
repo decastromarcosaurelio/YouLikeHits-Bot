@@ -18,7 +18,7 @@ class TaskSelectionTests(unittest.TestCase):
         self.assertEqual(main_cli.parse_task_selection("NONE", ["bonus"]), [])
 
     def test_garbage_is_rejected(self):
-        for answer in ("x", "0", "9", "1,x", "1;2"):
+        for answer in ("x", "0", "11", "1,x", "1;2"):
             self.assertIsNone(main_cli.parse_task_selection(answer, []), answer)
 
 

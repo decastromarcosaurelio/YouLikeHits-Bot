@@ -14,6 +14,10 @@ from .youtube import process_youtube_once, PAGE as YOUTUBE_PAGE
 from .youtube_likes import process_youtube_likes_once, PAGE as YOUTUBE_LIKES_PAGE
 from .soundcloud import process_soundcloud_once, PAGE as SOUNDCLOUD_PAGE
 from .soundcloud_follows import process_soundcloud_follows_once, PAGE as SOUNDCLOUD_FOLLOWS_PAGE
+from .instagram_follows import process_instagram_follows_once, PAGE as INSTAGRAM_PAGE
+from .instagram_likes import process_instagram_likes_once, PAGE as INSTAGRAM_LIKES_PAGE
+from .twitter_follows import process_twitter_follows_once, PAGE as TWITTER_PAGE
+from .twitter_likes import process_twitter_likes_once, PAGE as TWITTER_LIKES_PAGE
 from . import settings as settings_mod
 
 
@@ -35,13 +39,27 @@ def _steps(driver, log_func, is_stopped, settings):
         "soundcloud_follows": ("Processing SoundCloud follows...", SOUNDCLOUD_FOLLOWS_PAGE,
                                lambda: process_soundcloud_follows_once(driver, log_func, is_stopped,
                                                                        limit=q["soundcloud_follows"])),
+        "instagram": ("Processing Instagram follows...", INSTAGRAM_PAGE,
+                      lambda: process_instagram_follows_once(driver, log_func, is_stopped,
+                                                             limit=q["instagram"])),
+        "instagram_likes": ("Processing Instagram likes...", INSTAGRAM_LIKES_PAGE,
+                            lambda: process_instagram_likes_once(driver, log_func, is_stopped,
+                                                                 limit=q["instagram_likes"])),
+        "twitter": ("Processing Twitter follows...", TWITTER_PAGE,
+                    lambda: process_twitter_follows_once(driver, log_func, is_stopped,
+                                                         limit=q["twitter"])),
+        "twitter_likes": ("Processing Twitter likes...", TWITTER_LIKES_PAGE,
+                          lambda: process_twitter_likes_once(driver, log_func, is_stopped,
+                                                             limit=q["twitter_likes"])),
     }
 
 
 def quota_summary(settings):
     """'3 sites, 2 videos, 2 likes, 2 tracks, 2 follows' for the enabled tasks."""
     unit = {"websites": "sites", "youtube": "videos", "youtube_likes": "likes",
-            "soundcloud": "tracks", "soundcloud_follows": "follows"}
+            "soundcloud": "tracks", "soundcloud_follows": "follows",
+            "instagram": "follows", "instagram_likes": "likes",
+            "twitter": "follows", "twitter_likes": "likes"}
     return ", ".join(f"{settings[f'{key}_per_cycle']} {unit[key]}"
                      for key in settings_mod.enabled_tasks(settings) if key in unit)
 

@@ -9,7 +9,7 @@ from bot_logic import settings as settings_mod
 def _setting_up():
     print("\n[*] Starting 'Setting Up' mode...")
     print("[*] The browser will open. Please log in to YouLikeHits.")
-    print("[*] For YouTube Likes and SoundCloud Follows, also log in to YouTube and SoundCloud there.")
+    print("[*] For the like/follow tasks, also log in there to YouTube, SoundCloud, Instagram and Twitter (X).")
     print("[*] Close the browser window when you are done to return to this menu.")
     driver = setup_browser()
     if not driver:
@@ -102,8 +102,12 @@ def main_menu():
         print("4. YouTube Likes Loop")
         print("5. SoundCloud Plays Loop")
         print("6. SoundCloud Follows Loop")
-        print("7. Daily Bonus Claimer")
-        print("8. Master Loop (Cycles through the selected tasks)")
+        print("7. Instagram Followers Loop")
+        print("8. Instagram Likes Loop")
+        print("9. Twitter Followers Loop")
+        print("10. Twitter Likes Loop")
+        print("11. Daily Bonus Claimer")
+        print("12. Master Loop (Cycles through the selected tasks)")
         print("0. Exit")
         print("=" * 50)
 
@@ -127,16 +131,28 @@ def main_menu():
             from bot_logic.soundcloud_follows import start_soundcloud_follows_loop
             start_soundcloud_follows_loop(setup_browser)
         elif choice == "7":
+            from bot_logic.instagram_follows import start_instagram_follows_loop
+            start_instagram_follows_loop(setup_browser)
+        elif choice == "8":
+            from bot_logic.instagram_likes import start_instagram_likes_loop
+            start_instagram_likes_loop(setup_browser)
+        elif choice == "9":
+            from bot_logic.twitter_follows import start_twitter_follows_loop
+            start_twitter_follows_loop(setup_browser)
+        elif choice == "10":
+            from bot_logic.twitter_likes import start_twitter_likes_loop
+            start_twitter_likes_loop(setup_browser)
+        elif choice == "11":
             from bot_logic.bonus import start_bonus_loop
             start_bonus_loop(setup_browser)
-        elif choice == "8":
+        elif choice == "12":
             from bot_logic.master import start_master_loop
             start_master_loop(setup_browser, settings=_ask_master_settings())
         elif choice == "0":
             print("\n[*] Exiting Autobot. Goodbye!")
             sys.exit(0)
         else:
-            print("\n[!] Invalid choice. Please enter a number from 0 to 8.")
+            print("\n[!] Invalid choice. Please enter a number from 0 to 12.")
 
 
 if __name__ == "__main__":
